@@ -36,7 +36,7 @@ impl Default for OllamaConfig {
         OllamaConfig {
             base_url: "http://localhost:11434".into(),
             planner_model: "qwen3.8-114k".into(),
-            reader_model: "qwen3.8".into(),
+            reader_model: "qwen3.8-114k".into(),
             temperature: 0.0,
             seed: 0,
         }
