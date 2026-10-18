@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["libs/labels", "libs/labeld", "libs/host", "libs/gate", "libs/plan", "libs/executor"]
+members = ["libs/labels", "libs/labeld", "libs/host", "libs/gate", "libs/plan", "libs/executor", "libs/models"]
 
 [workspace.package]
 version = "0.1.0"
