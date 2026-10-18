@@ -1,0 +1,17 @@
+[package]
+name = "fewshot-harness"
+description = "Adversarial test harness: hijacked reader stub, injection scenarios and a deny-all oracle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+fewshot-labeld.workspace = true
+fewshot-gate.workspace = true
+fewshot-plan.workspace = true
+fewshot-executor.workspace = true
+fewshot-host = { workspace = true, features = ["std"] }
+
+[lints]
+workspace = true

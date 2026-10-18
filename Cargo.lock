@@ -176,6 +176,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fewshot-harness"
+version = "0.1.0"
+dependencies = [
+ "fewshot-executor",
+ "fewshot-gate",
+ "fewshot-host",
+ "fewshot-labeld",
+ "fewshot-plan",
+]
+
+[[package]]
 name = "fewshot-host"
 version = "0.1.0"
 
