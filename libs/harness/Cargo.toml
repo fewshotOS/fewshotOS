@@ -1,6 +1,6 @@
 [package]
 name = "fewshot-harness"
-description = "Adversarial test harness: hijacked reader stub, injection scenarios and a deny-all oracle"
+description = "Adversarial test harness: hijacked stubs, injection scenarios, a deny-all oracle and the injection-bench binary"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
