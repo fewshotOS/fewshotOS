@@ -1,0 +1,19 @@
+[package]
+name = "fewshot-executor"
+description = "The plan interpreter: runs plans through the gate, with drafts, checkpoints and saga compensation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+fewshot-labeld.workspace = true
+fewshot-gate.workspace = true
+fewshot-host.workspace = true
+fewshot-plan.workspace = true
+
+[dev-dependencies]
+fewshot-host = { workspace = true, features = ["std"] }
+
+[lints]
+workspace = true

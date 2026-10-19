@@ -1,0 +1,22 @@
+[package]
+name = "fewshot-models"
+description = "Local Ollama-backed planner and reader (Qwen)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+fewshot-gate.workspace = true
+fewshot-plan.workspace = true
+fewshot-executor.workspace = true
+serde = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std"] }
+# Plain HTTP to a local Ollama: no TLS stack.
+ureq = { version = "2.12.1", default-features = false, features = ["json"] }
+
+[dev-dependencies]
+fewshot-labeld.workspace = true
+
+[lints]
+workspace = true

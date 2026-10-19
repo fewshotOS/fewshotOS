@@ -63,6 +63,32 @@ mod i2_untrusted_data_cannot_steer {
     }
 
     #[test]
+    fn calls_after_reading_tainted_data_need_approval() {
+        // An implicit flow: the arguments are clean, but the session read
+        // untrusted data first, so that data may have decided the call.
+        let mut w = World::new();
+        let cond = w.web(b"reply");
+        let inv = Invocation::new(SEND, [w.user(b"a@b.example"), w.user(b"hi")]);
+        w.table.view(S1).read(cond).unwrap();
+        let Ok(Decision::NeedsApproval(req)) = w.invoke(&inv) else { panic!() };
+        assert!(req.context_below_floor);
+        assert_eq!(req.context.integrity, Integrity::UntrustedWeb);
+        assert_eq!(req.args.iter().map(|a| a.below_floor).collect::<Vec<_>>(), [false, false]);
+        assert_eq!(w.gate.outbox_len(S1), 0);
+        let (_, approval) = w.request(&inv);
+        assert!(matches!(w.invoke(&inv.with_approval(approval)), Ok(Decision::Queued { .. })));
+    }
+
+    #[test]
+    fn context_at_or_above_the_floor_needs_no_approval() {
+        let mut w = World::new();
+        let cond = w.value(S1, b"x", Label::new(Secrecy::EMPTY, Integrity::ThirdParty));
+        w.table.view(S1).read(cond).unwrap();
+        let text = w.user(b"note");
+        assert!(matches!(w.invoke(&Invocation::new(NOTE, [text])), Ok(Decision::Executed(Ok(())))));
+    }
+
+    #[test]
     fn taint_survives_derivation() {
         // Labels come from the value table, so laundering a value through
         // derive cannot raise its integrity (ADR-0005).
@@ -122,6 +148,17 @@ mod i3_no_uncleared_egress {
         let to = w.web(b"a@b.example");
         let body = w.value(S1, b"diagnosis", Label::new(Secrecy::EMPTY.with(HEALTH), Integrity::User));
         assert_eq!(w.invoke(&Invocation::new(SEND, [to, body])).unwrap_err().reason, Reason::EgressNotCleared);
+    }
+
+    #[test]
+    fn secrets_read_before_a_call_cannot_leave_through_it() {
+        // Whether the send happens may encode the secret, even with clean
+        // arguments.
+        let mut w = World::new();
+        let secret = w.value(S1, b"diagnosis", Label::new(Secrecy::EMPTY.with(HEALTH), Integrity::User));
+        let inv = Invocation::new(SEND, [w.user(b"a@b.example"), w.user(b"hi")]);
+        w.table.view(S1).read(secret).unwrap();
+        assert_eq!(w.invoke(&inv).unwrap_err().reason, Reason::EgressNotCleared);
     }
 
     #[test]
@@ -373,6 +410,32 @@ mod oracle {
             };
             prop_assert_eq!(actual, expected);
             prop_assert!(w.fx.calls.is_empty(), "external effects never run before commit");
+        }
+
+        #[test]
+        fn send_matches_rules_with_context(i0 in integrity(), ic in integrity(), s0 in 0u64..8, sc in 0u64..8) {
+            // The session's principal label counts as an input to the call.
+            let mut w = World::new();
+            let a = w.value(S1, b"to", Label::new(Secrecy::from_bits(s0), i0));
+            let b = w.user(b"body");
+            let read = w.value(S1, b"cond", Label::new(Secrecy::from_bits(sc), ic));
+            w.table.view(S1).read(read).unwrap();
+            let joined = Label::new(Secrecy::from_bits(s0 | sc), i0.min(ic));
+
+            let expected = if !joined.secrecy.is_subset(Secrecy::EMPTY.with(WORK)) {
+                Expected::Egress
+            } else if joined.integrity < Integrity::User {
+                Expected::Approval
+            } else {
+                Expected::Run
+            };
+            let actual = match w.invoke(&Invocation::new(SEND, [a, b])) {
+                Ok(Decision::Queued { .. }) => Expected::Run,
+                Ok(Decision::NeedsApproval(_)) => Expected::Approval,
+                Err(r) if r.reason == Reason::EgressNotCleared => Expected::Egress,
+                other => panic!("unexpected {other:?}"),
+            };
+            prop_assert_eq!(actual, expected);
         }
 
         #[test]
