@@ -20,6 +20,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - run: cargo run --locked -p fewshot-harness --bin injection-bench
 
   no-std:
     name: no_std build (${{ matrix.target }})
@@ -30,4 +31,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --locked --target ${{ matrix.target }} --no-default-features -p fewshot-labels -p fewshot-labeld -p fewshot-host -p fewshot-gate
+      - run: cargo build --locked --target ${{ matrix.target }} --no-default-features -p fewshot-labels -p fewshot-labeld -p fewshot-host -p fewshot-gate -p fewshot-plan -p fewshot-executor
