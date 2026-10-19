@@ -3,8 +3,9 @@
 //! Every runtime value in an agent session lives here with its label and
 //! provenance. Agents hold only [`Handle`]s. Deriving a value goes through
 //! [`ValueTable::derive`], which computes the new label as the join of its
-//! inputs, so no agent component can choose or misstate a label. Only holders
-//! of an [`Ingress`] capability can bring new labeled data in.
+//! inputs and everything the session has read, so no agent component can
+//! choose or misstate a label. Agents get a [`SessionView`]; only holders of an
+//! [`Ingress`] capability can bring new labeled data in.
 #![no_std]
 
 extern crate alloc;
@@ -131,8 +132,15 @@ impl ValueTable {
         self.push(session, value, label, Provenance::Ingress { origin: origin.into() })
     }
 
-    /// Computes a new value from `inputs`. Its label is the join of their labels;
-    /// the caller cannot set it.
+    /// An agent session's view of the table: derive and read only.
+    pub fn view(&mut self, session: SessionId) -> SessionView<'_> {
+        SessionView { table: self, session }
+    }
+
+    /// Computes a new value from `inputs`. Its label is the join of their labels
+    /// and the session's principal label; the caller cannot set it. Joining the
+    /// principal label means bytes the session has read cannot come back out
+    /// with a better label by being passed as a new value with fewer inputs.
     pub fn derive(
         &mut self,
         session: SessionId,
@@ -140,7 +148,7 @@ impl ValueTable {
         inputs: &[Handle],
         value: Vec<u8>,
     ) -> Result<Handle, TableError> {
-        let mut label = Label::TOP;
+        let mut label = self.principal_label(session);
         for &h in inputs {
             label = label.join(self.entry(session, h)?.label);
         }
@@ -162,8 +170,8 @@ impl ValueTable {
         self.sessions.get(&session).and_then(|s| s.principal).unwrap_or(Label::TOP)
     }
 
-    /// Looks up a value, its label and provenance. For trusted components
-    /// (the gate); does not count as a read by the session.
+    /// Looks up a value, its label and provenance. Trusted callers only (gate,
+    /// host); does not count as a read by the session. Agents use [`SessionView`].
     pub fn resolve(&self, session: SessionId, h: Handle) -> Result<Resolved<'_>, TableError> {
         let e = self.entry(session, h)?;
         Ok(Resolved { value: &e.value, label: e.label, provenance: &e.provenance })
@@ -197,6 +205,31 @@ impl ValueTable {
         let index = u32::try_from(s.entries.len()).expect("value table full");
         s.entries.push(Entry { value, label, provenance });
         Ok(Handle { session, index })
+    }
+}
+
+/// What an agent session may do with the table: no ingress, no resolve.
+/// Every read raises the session's principal label, and every derived value
+/// carries it.
+pub struct SessionView<'a> {
+    table: &'a mut ValueTable,
+    session: SessionId,
+}
+
+impl SessionView<'_> {
+    /// The session this view acts for.
+    pub fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// See [`ValueTable::derive`].
+    pub fn derive(&mut self, op: impl Into<String>, inputs: &[Handle], value: Vec<u8>) -> Result<Handle, TableError> {
+        self.table.derive(self.session, op, inputs, value)
+    }
+
+    /// See [`ValueTable::read`].
+    pub fn read(&mut self, h: Handle) -> Result<&[u8], TableError> {
+        self.table.read(self.session, h)
     }
 }
 
@@ -245,6 +278,36 @@ mod tests {
         assert_eq!(t.principal_label(S1), Label::TOP, "resolve is not a read");
         t.read(S1, a).unwrap();
         assert_eq!(t.principal_label(S1).integrity, Integrity::UntrustedWeb);
+    }
+
+    #[test]
+    fn derive_after_read_carries_principal_taint() {
+        let (mut t, cap) = ValueTable::new();
+        let page = t.intern(&cap, S1, b"attacker@evil.example".to_vec(), web(), "web").unwrap();
+        let mut v = t.view(S1);
+        let bytes = v.read(page).unwrap().to_vec();
+        let laundered = v.derive("copy", &[], bytes).unwrap();
+        assert_eq!(t.resolve(S1, laundered).unwrap().label.integrity, Integrity::UntrustedWeb);
+    }
+
+    #[test]
+    fn derive_carries_secrecy_of_reads() {
+        let (mut t, cap) = ValueTable::new();
+        let note = t.intern(&cap, S1, b"diagnosis".to_vec(), user_secret(), "user:input").unwrap();
+        let mut v = t.view(S1);
+        v.read(note).unwrap();
+        let out = v.derive("summary", &[], b"fine".to_vec()).unwrap();
+        assert_eq!(t.resolve(S1, out).unwrap().label, user_secret());
+    }
+
+    #[test]
+    fn derive_without_reads_is_clean() {
+        let (mut t, cap) = ValueTable::new();
+        let a = t.intern(&cap, S1, b"hi".to_vec(), Label::TOP, "user:input").unwrap();
+        t.intern(&cap, S2, b"x".to_vec(), web(), "web").unwrap();
+        t.view(S2).read(Handle { session: S2, index: 0 }).unwrap();
+        let b = t.view(S1).derive("upper", &[a], b"HI".to_vec()).unwrap();
+        assert_eq!(t.resolve(S1, b).unwrap().label, Label::TOP, "another session's reads do not taint S1");
     }
 
     #[test]
