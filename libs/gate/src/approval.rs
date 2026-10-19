@@ -47,6 +47,11 @@ pub struct ApprovalRequest {
     pub action: ActionId,
     /// Per-argument facts.
     pub args: Vec<ArgSummary>,
+    /// The session's principal label: everything it read before the call.
+    pub context: Label,
+    /// Whether the context is why approval is needed: the call depends on
+    /// data below the floor even if every argument is clean.
+    pub context_below_floor: bool,
 }
 
 /// The user's signed consent to exactly one invocation.

@@ -242,7 +242,12 @@ impl<C: Clock> Gate<C> {
                 }
             }
         }
-        let label = Label::join_all(resolved.iter().map(|r| r.label));
+        // The session's principal label is everything its caller has read,
+        // so it counts as an input to every call: data that only decided
+        // *whether* the call happens (an implicit flow) is accounted for too.
+        let context = table.principal_label(session);
+        let label = Label::join_all(resolved.iter().map(|r| r.label)).join(context);
+        let context_below_floor = context.integrity < spec.integrity_floor;
 
         // 3. Egress (I3).
         if spec.effect == Effect::External && !label.secrecy.is_subset(spec.egress_clearance) {
@@ -263,9 +268,9 @@ impl<C: Clock> Gate<C> {
         // 4. Integrity floor (I2, ADR-0006).
         let below: Vec<bool> =
             resolved.iter().zip(&spec.params).map(|(r, p)| !passes_floor(r, p, spec.integrity_floor)).collect();
-        let digest = if below.contains(&true) {
+        let digest = if below.contains(&true) || context_below_floor {
             match &inv.approval {
-                None => return Ok(self.request_approval(session, &spec, &resolved, &below)),
+                None => return Ok(self.request_approval(session, &spec, &resolved, &below, context)),
                 Some(a) => {
                     if let Err(e) = self.accept_approval(session, inv.action, a, &resolved) {
                         let detail = format!("approval for {} rejected: {e:?}", spec.name);
@@ -384,6 +389,7 @@ impl<C: Clock> Gate<C> {
         spec: &ActionSpec,
         resolved: &[Resolved<'_>],
         below: &[bool],
+        context: Label,
     ) -> Decision {
         let nonce = self.fresh_nonce();
         let digest = invocation_digest(session, spec.id, nonce, resolved);
@@ -403,7 +409,15 @@ impl<C: Clock> Gate<C> {
                 below_floor,
             })
             .collect();
-        Decision::NeedsApproval(ApprovalRequest { digest, nonce, session, action: spec.id, args })
+        Decision::NeedsApproval(ApprovalRequest {
+            digest,
+            nonce,
+            session,
+            action: spec.id,
+            args,
+            context,
+            context_below_floor: context.integrity < spec.integrity_floor,
+        })
     }
 
     fn accept_approval(
