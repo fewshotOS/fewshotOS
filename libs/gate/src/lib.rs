@@ -24,7 +24,7 @@ mod audit;
 mod caps;
 mod refusal;
 
-pub use action::{ActionId, ActionSpec, DuplicateAction, Effect, Param, ParamKind, Registry};
+pub use action::{ActionId, ActionSpec, DuplicateAction, Effect, Param, ParamKind, Registry, RegistryError};
 pub use approval::{ApprovalRequest, Approver, ArgSummary, Digest, Nonce, SignedApproval, signed_message};
 pub use audit::{AuditEntry, AuditKind, AuditLog};
 pub use caps::CapSet;
@@ -138,6 +138,11 @@ impl<C: Clock> Gate<C> {
             used: BTreeSet::new(),
             next_nonce: 1,
         }
+    }
+
+    /// The action registry.
+    pub fn registry(&self) -> &Registry {
+        &self.registry
     }
 
     /// The audit log.

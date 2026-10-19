@@ -31,6 +31,8 @@ pub fn registry() -> Registry {
         integrity_floor: floor,
         egress_clearance: clearance,
         params,
+        draft_for: None,
+        compensation: None,
     };
     r.register(mk(READ, "doc.read", Effect::Read, Integrity::UntrustedWeb, Secrecy::EMPTY, vec![Param::open("doc")]))
         .unwrap();
