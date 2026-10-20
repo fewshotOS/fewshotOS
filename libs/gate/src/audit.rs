@@ -80,14 +80,7 @@ impl AuditLog {
 
     /// Checks the hash chain; returns the first broken position.
     pub fn verify(&self) -> Result<(), u64> {
-        let mut prev = [0u8; 32];
-        for e in &self.entries {
-            if e.prev != prev || e.hash != entry_hash(e) {
-                return Err(e.seq);
-            }
-            prev = e.hash;
-        }
-        Ok(())
+        verify_chain(&self.entries)
     }
 
     pub(crate) fn append(
@@ -110,6 +103,24 @@ impl AuditLog {
     pub(crate) fn entries_mut(&mut self) -> &mut Vec<AuditEntry> {
         &mut self.entries
     }
+}
+
+/// Checks a whole log read back from storage: it starts at `seq` 0 with a
+/// zero `prev`, numbers entries consecutively, and every hash matches.
+/// Returns the `seq` of the first broken entry (or its position, if `seq`
+/// is wrong).
+pub fn verify_chain(entries: &[AuditEntry]) -> Result<(), u64> {
+    let mut prev = [0u8; 32];
+    for (i, e) in entries.iter().enumerate() {
+        if e.seq != i as u64 {
+            return Err(i as u64);
+        }
+        if e.prev != prev || e.hash != entry_hash(e) {
+            return Err(e.seq);
+        }
+        prev = e.hash;
+    }
+    Ok(())
 }
 
 fn entry_hash(e: &AuditEntry) -> [u8; 32] {
@@ -181,6 +192,19 @@ mod tests {
         assert_eq!(log.verify(), Ok(()));
         log.entries_mut()[1].kind = AuditKind::EffectSucceeded;
         assert_eq!(log.verify(), Err(1));
+    }
+
+    #[test]
+    fn verify_chain_rejects_dropped_or_reordered_entries() {
+        let mut log = AuditLog::default();
+        for i in 0..3 {
+            log.append(i, SessionId(1), None, None, AuditKind::SessionOpened);
+        }
+        let all = log.entries();
+        assert_eq!(verify_chain(all), Ok(()));
+        assert_eq!(verify_chain(&all[1..]), Err(0), "a log must start at seq 0");
+        assert_eq!(verify_chain(&[all[0], all[2]]), Err(1), "no gaps");
+        assert_eq!(verify_chain(&[all[0], all[2], all[1]]), Err(1));
     }
 
     #[test]

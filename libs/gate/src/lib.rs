@@ -30,7 +30,7 @@ mod refusal;
 
 pub use action::{ActionId, ActionSpec, DuplicateAction, Effect, Param, ParamKind, Registry, RegistryError};
 pub use approval::{ApprovalRequest, Approver, ArgSummary, Digest, Nonce, SignedApproval, signed_message};
-pub use audit::{AuditEntry, AuditKind, AuditLog, AuditSink, SinkError};
+pub use audit::{AuditEntry, AuditKind, AuditLog, AuditSink, SinkError, verify_chain};
 pub use caps::CapSet;
 pub use ed25519_dalek::VerifyingKey;
 pub use refusal::{ApprovalError, Grantor, Reason, Refusal};
