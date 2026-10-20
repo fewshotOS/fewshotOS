@@ -14,6 +14,9 @@ fewshot-plan.workspace = true
 fewshot-executor.workspace = true
 serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
+sha2.workspace = true
+# `tls` (rustls) only: `http.get` is `https` and no other action may do network.
+ureq = { version = "2.12.1", default-features = false, features = ["tls"] }
 toml = "1.1.8"
 dirs = "7.0.0"
 
