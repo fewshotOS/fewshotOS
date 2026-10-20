@@ -16,6 +16,7 @@
 //! `fewshot-runtime` is a `std` crate: it reads files, the wall clock and the
 //! config directory. The policy core it hosts stays `no_std`.
 
+pub mod actions;
 pub mod audit;
 pub mod config;
 
@@ -100,6 +101,8 @@ pub enum RuntimeError {
     Audit(String),
     /// The quarantined reader failed.
     Read(String),
+    /// Setting up the effects host failed (data directories, …).
+    Io(String),
 }
 
 impl fmt::Display for RuntimeError {
@@ -115,6 +118,7 @@ impl fmt::Display for RuntimeError {
             RuntimeError::Refused(r) => write!(f, "runtime: {r}"),
             RuntimeError::Audit(m) => write!(f, "runtime: audit sink: {m}"),
             RuntimeError::Read(m) => write!(f, "runtime: quarantined read: {m}"),
+            RuntimeError::Io(m) => write!(f, "runtime: i/o: {m}"),
         }
     }
 }
@@ -308,6 +312,17 @@ impl<E: Effects> Runtime<E> {
         let name = self.sessions.get(&session).ok_or(RuntimeError::UnknownSession { id: session })?;
         self.client(name)
     }
+}
+
+/// The runtime over the built-in actions (T3): the registry `config` allows,
+/// and one [`actions::HostEffects`] that runs them.
+pub fn builtin_runtime(
+    config: Config,
+    approval_key: VerifyingKey,
+) -> Result<Runtime<actions::HostEffects>, RuntimeError> {
+    let effects = actions::HostEffects::new(&config).map_err(|e| RuntimeError::Io(e.to_string()))?;
+    let registry = actions::builtin_registry(&config);
+    Runtime::new(config, registry, approval_key, effects)
 }
 
 #[cfg(test)]
