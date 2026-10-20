@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["libs/labels", "libs/labeld", "libs/host", "libs/gate", "libs/plan", "libs/executor", "libs/models", "libs/harness"]
+members = ["libs/labels", "libs/labeld", "libs/host", "libs/gate", "libs/plan", "libs/executor", "libs/models", "libs/runtime", "libs/harness"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,6 +15,7 @@ fewshot-host = { path = "libs/host", default-features = false }
 fewshot-gate = { path = "libs/gate" }
 fewshot-plan = { path = "libs/plan" }
 fewshot-executor = { path = "libs/executor" }
+fewshot-runtime = { path = "libs/runtime" }
 serde = { version = "1.0.210", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.140", default-features = false, features = ["alloc"] }
 sha2 = { version = "0.10.9", default-features = false }
