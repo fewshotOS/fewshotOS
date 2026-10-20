@@ -1,0 +1,18 @@
+[package]
+name = "fewshot-approve"
+description = "The Fewshot approval app: a separate window that holds the approval key"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+fewshot-approval.workspace = true
+fewshot-gate.workspace = true
+eframe = "0.37.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lints]
+workspace = true
