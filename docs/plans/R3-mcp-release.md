@@ -133,7 +133,7 @@ New std crate `libs/runtime`.
 | `fs.restore` | LocalReversible | `path`, `content` | — | Compensation of `fs.write`: `content` is the undo id. |
 | `fs.delete` | LocalIrreversible | `path` | — | Queued; moves to `data_dir/trash/`. Floor `SystemApp`. |
 | `notes.append` | LocalReversible | `text` | — | Appends to `data_dir/notes.md`. Floor `ThirdParty`, so routine. |
-| `http.get` | Read | `url` | `UntrustedWeb`, no secrecy | `https` only, 2 MiB cap, 15 s timeout, via `ureq` with rustls. External egress of the URL itself: `egress_clearance` empty, so a URL carrying secret data is refused. |
+| `http.get` | Fetch | `url` | `UntrustedWeb`, no secrecy | `https` only, 2 MiB cap, 15 s timeout, via `ureq` with rustls. `Effect::Fetch` (#33) runs at once but is egress-checked: `egress_clearance` empty, so a URL carrying secret data, or a fetch after a secret was read, is refused. |
 
 Path rules, enforced before any I/O and tested: the path must canonicalize to inside a configured root; `..`, symlinks out of a root, and Windows device names (`NUL`, `CON`, `\\?\`) are refused with `EffectError`. Tests use `tempfile` roots; `http.get` is tested against a local `std::net::TcpListener` serving a fixed response (allow `http://127.0.0.1` only under `#[cfg(test)]`).
 
