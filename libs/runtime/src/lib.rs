@@ -19,6 +19,7 @@
 pub mod actions;
 pub mod audit;
 pub mod config;
+pub mod timeline;
 
 use std::collections::BTreeMap;
 use std::fmt;
