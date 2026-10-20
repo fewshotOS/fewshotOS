@@ -32,6 +32,9 @@ pub const MAX_LOOP: u32 = 64;
 pub const MAX_DEPTH: usize = 4;
 /// Maximum total number of steps in a plan, with each loop counted once.
 pub const MAX_STEPS: usize = 256;
+/// Maximum steps in one block: the top-level `steps`, or a `body`,
+/// `then` or `otherwise` list.
+pub const MAX_BLOCK_STEPS: usize = 32;
 
 /// A plan: an ordered list of steps to run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,10 +171,16 @@ pub enum PlanError {
         /// How many blocks it is nested inside.
         depth: usize,
     },
-    /// The plan has more than [`MAX_STEPS`] steps.
+    /// A block holds more steps than its limit allows: more than
+    /// [`MAX_BLOCK_STEPS`] in one block, or more than [`MAX_STEPS`] in the
+    /// whole plan.
     TooManySteps {
-        /// How many steps the plan has.
+        /// The offending block, e.g. `steps` or `steps[1].body`.
+        path: String,
+        /// How many steps the block has.
         count: usize,
+        /// The limit that the block exceeded.
+        limit: usize,
     },
     /// A `Schema::Choice` had no options or duplicated ones.
     BadChoice {
@@ -204,8 +213,8 @@ impl fmt::Display for PlanError {
             PlanError::TooDeep { path, depth } => {
                 write!(f, "{path}: loops and branches are nested {depth} deep, but the limit is {MAX_DEPTH}")
             }
-            PlanError::TooManySteps { count } => {
-                write!(f, "plan has {count} steps, but the limit is {MAX_STEPS}")
+            PlanError::TooManySteps { path, count, limit } => {
+                write!(f, "{path}: has {count} steps, but the limit is {limit}")
             }
             PlanError::BadChoice { path, options } => {
                 write!(f, "{path}: a Choice must list at least one option, each exactly once; got {options:?}")
@@ -225,7 +234,7 @@ pub fn parse(json: &str) -> Result<Plan, PlanError> {
 pub fn validate(plan: &Plan, registry: &Registry, inputs: &[&str]) -> Result<(), PlanError> {
     let total = count_steps(&plan.steps);
     if total > MAX_STEPS {
-        return Err(PlanError::TooManySteps { count: total });
+        return Err(PlanError::TooManySteps { path: "plan".into(), count: total, limit: MAX_STEPS });
     }
 
     let mut scope: BTreeSet<String> = inputs.iter().map(|s| s.to_string()).collect();
@@ -259,6 +268,9 @@ fn validate_steps(
 ) -> Result<(), PlanError> {
     if depth > MAX_DEPTH && !steps.is_empty() {
         return Err(PlanError::TooDeep { path: format!("{prefix}[0]"), depth });
+    }
+    if steps.len() > MAX_BLOCK_STEPS {
+        return Err(PlanError::TooManySteps { path: prefix.to_string(), count: steps.len(), limit: MAX_BLOCK_STEPS });
     }
 
     for (i, step) in steps.iter().enumerate() {
@@ -346,7 +358,7 @@ pub const PLAN_JSON_SCHEMA: &str = r##"{
   "type": "object",
   "required": ["steps"],
   "properties": {
-    "steps": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/step" } }
+    "steps": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/step" } }
   },
   "additionalProperties": false,
   "$defs": {
@@ -391,7 +403,7 @@ pub const PLAN_JSON_SCHEMA: &str = r##"{
             "var": { "type": "string" },
             "list": { "type": "string" },
             "max": { "type": "integer", "minimum": 1, "maximum": 64 },
-            "body": { "type": "array", "items": { "$ref": "#/$defs/step" } }
+            "body": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/step" } }
           },
           "additionalProperties": false
         },
@@ -402,8 +414,8 @@ pub const PLAN_JSON_SCHEMA: &str = r##"{
             "op": { "const": "if" },
             "var": { "type": "string" },
             "equals": { "type": "string" },
-            "then": { "type": "array", "items": { "$ref": "#/$defs/step" } },
-            "otherwise": { "type": "array", "items": { "$ref": "#/$defs/step" } }
+            "then": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/step" } },
+            "otherwise": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/step" } }
           },
           "additionalProperties": false
         },
@@ -656,6 +668,10 @@ mod tests {
         let names: Vec<&str> = ops.iter().map(|o| o["properties"]["op"]["const"].as_str().unwrap()).collect();
         assert_eq!(names, ["let", "call", "read", "for_each", "if", "checkpoint"]);
         assert_eq!(schema["$defs"]["step"]["oneOf"][3]["properties"]["max"]["maximum"], MAX_LOOP);
+        assert_eq!(schema["properties"]["steps"]["maxItems"], MAX_BLOCK_STEPS);
+        assert_eq!(schema["$defs"]["step"]["oneOf"][3]["properties"]["body"]["maxItems"], MAX_BLOCK_STEPS);
+        assert_eq!(schema["$defs"]["step"]["oneOf"][4]["properties"]["then"]["maxItems"], MAX_BLOCK_STEPS);
+        assert_eq!(schema["$defs"]["step"]["oneOf"][4]["properties"]["otherwise"]["maxItems"], MAX_BLOCK_STEPS);
         let sample = Plan {
             steps: alloc::vec![
                 Step::Read {
@@ -673,20 +689,38 @@ mod tests {
     }
 
     #[test]
-    fn rejects_too_many_steps() {
-        let steps = (0..MAX_STEPS + 1).map(|_| Step::Checkpoint).collect();
+    fn rejects_more_than_32_steps_in_one_block() {
+        let steps = (0..MAX_BLOCK_STEPS + 1).map(|_| Step::Checkpoint).collect();
         let plan = Plan { steps };
         match validate(&plan, &mk_registry(), &[]).unwrap_err() {
-            PlanError::TooManySteps { count } => assert_eq!(count, MAX_STEPS + 1),
+            PlanError::TooManySteps { path, count, limit } => {
+                assert_eq!(path, "steps");
+                assert_eq!(count, MAX_BLOCK_STEPS + 1);
+                assert_eq!(limit, MAX_BLOCK_STEPS);
+            }
             other => panic!("expected TooManySteps, got {other:?}"),
         }
     }
 
     #[test]
-    fn accepts_step_budget() {
-        let steps = (0..MAX_STEPS).map(|_| Step::Checkpoint).collect();
+    fn accepts_32_steps_in_one_block() {
+        let steps = (0..MAX_BLOCK_STEPS).map(|_| Step::Checkpoint).collect();
         let plan = Plan { steps };
         assert!(validate(&plan, &mk_registry(), &[]).is_ok());
+    }
+
+    #[test]
+    fn rejects_more_than_32_steps_in_a_nested_block() {
+        let body = (0..MAX_BLOCK_STEPS + 1).map(|_| Step::Checkpoint).collect();
+        let plan = Plan { steps: alloc::vec![for_each("e", "inbox", 1, body)] };
+        match validate(&plan, &mk_registry(), &["inbox"]).unwrap_err() {
+            PlanError::TooManySteps { path, count, limit } => {
+                assert_eq!(path, "steps[0].body");
+                assert_eq!(count, MAX_BLOCK_STEPS + 1);
+                assert_eq!(limit, MAX_BLOCK_STEPS);
+            }
+            other => panic!("expected TooManySteps, got {other:?}"),
+        }
     }
 
     #[test]

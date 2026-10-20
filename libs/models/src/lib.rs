@@ -9,7 +9,7 @@
 mod planner;
 mod reader;
 
-pub use planner::{OllamaPlanner, PLANNER_SYSTEM, render_input};
+pub use planner::{OllamaPlanner, PLANNER_FORMAT, PLANNER_SYSTEM, lint, render_input};
 pub use reader::{OllamaReader, READER_SYSTEM};
 
 use serde::Deserialize;
@@ -73,6 +73,8 @@ pub struct ChatRequest<'a> {
     pub user: &'a str,
     /// JSON schema the reply must match.
     pub format: &'a Value,
+    /// Sampling options, sent verbatim as Ollama's top-level `options`.
+    pub options: &'a Value,
 }
 
 /// Sends chat turns to a model. [`HttpChat`] talks to Ollama; tests use fakes.
@@ -85,8 +87,6 @@ pub trait Chat {
 pub struct HttpChat {
     agent: ureq::Agent,
     url: String,
-    temperature: f32,
-    seed: u64,
 }
 
 impl HttpChat {
@@ -94,12 +94,7 @@ impl HttpChat {
     pub fn new(config: &OllamaConfig) -> Self {
         // Local models can take minutes on long prompts.
         let agent = ureq::AgentBuilder::new().timeout_read(Duration::from_secs(900)).build();
-        HttpChat {
-            agent,
-            url: format!("{}/api/chat", config.base_url),
-            temperature: config.temperature,
-            seed: config.seed,
-        }
+        HttpChat { agent, url: format!("{}/api/chat", config.base_url) }
     }
 }
 
@@ -120,7 +115,7 @@ impl Chat for HttpChat {
             "stream": false,
             "think": false,
             "format": req.format,
-            "options": { "temperature": self.temperature, "seed": self.seed },
+            "options": req.options,
             "messages": [
                 { "role": "system", "content": req.system },
                 { "role": "user", "content": req.user },
