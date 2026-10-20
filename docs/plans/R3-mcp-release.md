@@ -62,9 +62,11 @@ Dependency direction: `gate ← runtime ← approval ← apps`. `runtime` also u
 
 ---
 
-## T0 — Close R2: a live planner that writes usable plans (models)
+## T0 — Close R2: a live planner that writes usable plans (models) — **done in #32**
 
-**Problem.** `cargo test -p fewshot-models -- --ignored` fails: `live_reader_round_trip` passes, but `qwen3.8-114k` answers the planner round trip with 40+ `Let` steps binding `"inbox"`/`"archive"` under ever-new names and no `for_each` or `call`. That plan is schema-valid and validates, so the retries never fire. This is the usual degenerate loop of schema-constrained decoding at temperature 0 with no worked example.
+**Problem.** `cargo test -p fewshot-models -- --ignored` fails: `live_reader_round_trip` passes, but `qwen3.8-114k` answers the planner round trip with 40+ `Let` steps binding `"inbox"`/`"archive"` under ever-new names and no `for_each` or `call`. That plan is schema-valid and validates, so the retries never fire.
+
+**Actual cause (found in #32):** Ollama orders each object's properties alphabetically when it turns a JSON schema into a grammar. The model writes `{"op":` first, and only `let` and `checkpoint` put `op` first, so no other step could be generated. #32 sends a loose `PLANNER_FORMAT` (an object with a `steps` array of objects) and relies on `validate` and `lint`. The changes below were made as well.
 
 **Changes (all in `libs/models`, plus `PLAN_JSON_SCHEMA` in `libs/plan`):**
 - `PLAN_JSON_SCHEMA`: add `"maxItems": 32` to the top-level `steps` and to every `body`/`then`/`otherwise` array. The validator already limits depth and loops; add the same 32-step limit there as `PlanError::TooManySteps` with a test.
@@ -79,14 +81,14 @@ Dependency direction: `gate ← runtime ← approval ← apps`. `runtime` also u
 
 **Also:** tick "Planner / quarantined reader split against a local model" in `docs/issues/R2.md`.
 
-## T1 — Action outputs and an audit sink (gate, **TCB — written by the reviewer**)
+## T1 — Action outputs and an audit sink (gate, **TCB — written by the reviewer**) — **done in #33**
 
-- `ActionSpec` gains `output: Option<Label>`: the label of what the action returns. `Registry::validate` rejects an output on an action whose effect is not immediate (`Read`, `LocalReversible`), because queued effects run at commit when nobody is waiting for a value.
-- `Effects::run` returns `Result<Vec<u8>, EffectError>`. `Decision::Executed` carries `Result<Vec<u8>, EffectError>`. Actions with `output: None` must return an empty vec; the gate turns anything else into `EffectError("unexpected output")`.
-- `AuditKind::EffectFinished { output_hash: [u8; 32] }` is appended after an immediate effect returns, hashing the output bytes. The gate does **not** intern outputs: it has no `Ingress`. The host interns them with label `spec.output ⊔ (labels of the arguments)` (helper `fewshot_gate::output_label(&spec, &resolved_args)`), so a read steered by tainted arguments yields tainted output.
-- `AuditLog` gains an optional `Box<dyn AuditSink>` (`fn append(&mut self, entry: &AuditEntry)`), called for each entry right after it is chained and before the effect runs. A sink error refuses the effect (`Reason::AuditUnavailable`), keeping I4 when the disk is full.
-- Invariant tests: `i4_audit_before_effect` gains "a failing sink stops the effect"; a new `outputs` module checks output-label joins, that queued effects can't declare outputs, and that `EffectFinished` hashes match.
-- Update `executor`, `harness`, and all `Effects` impls for the new signature (they return `Ok(vec![])`).
+As built (later tasks code against this):
+- `ActionSpec.output: Option<Label>`. `Registry::validate` rejects an output on a queued action (`RegistryError::OutputOnQueuedEffect`).
+- `Effects::run` returns `Result<Vec<u8>, EffectError>`; actions without an output return an empty vec.
+- `Decision::Executed(Result<Option<Output>, EffectError>)` with `Output { value, label }`. **The gate computes `label`**: the declared output label joined with the call's label (every argument and the session's principal label). The host interns `value` with exactly `label` through its `Ingress`. Undeclared outputs, and outputs from queued effects, fail the effect.
+- `AuditKind::EffectReturned(sha256(output))` replaces `EffectSucceeded` when an effect returns bytes.
+- `trait AuditSink { fn append(&mut self, &AuditEntry) -> Result<(), SinkError> }`, attached with `Gate::set_audit_sink(Box<dyn AuditSink>)`. It receives every entry not yet stored, in order, and a backlog is retried on the next append. An effect runs only once everything up to its `EffectStarted` is stored; otherwise it fails with `EffectError` and `EffectFailed` is audited. `Gate::audit_stored()` reports whether the sink is up to date.
 
 ## T2 — `fewshot-runtime`: config and sessions
 
@@ -115,8 +117,8 @@ New std crate `libs/runtime`.
   personal = 1
   ```
   Unknown keys are an error. `literal_integrity = "user"` is an error. Paths are canonicalized at load.
-- **Runtime** (`lib.rs`): owns `ValueTable`, `Ingress`, `Gate<SystemClock>`, the registry of built-in actions (T3), and a map of sessions. `Runtime::open_session(client_name) -> SessionId` grants exactly the client's actions. `Runtime::literal(session, bytes) -> Handle` interns at the client's `literal_integrity` joined with `table.principal_label(session)`. `Runtime::call(session, action_name, args: Vec<Handle>) -> CallResult` invokes the gate and, on an immediate effect with output, interns it with `fewshot_gate::output_label`. `Runtime::reveal(session, handle) -> Vec<u8>` goes through `SessionView::read`. `Runtime::extract(session, handle, schema)` goes through `fewshot_executor::host::Quarantine` with `OllamaReader`. `Runtime::run_task(session, request, inputs)` runs the planner and executor (approvals are handled by the caller, see T4).
-- **File audit sink** (`audit.rs`): one JSON object per line in `data_dir/audit/<yyyy-mm-dd>.jsonl`, `fsync` after each line. Each line carries the entry and its chain hash. `fn load(dir) -> Result<Vec<AuditEntry>, AuditFileError>` re-verifies the chain across files.
+- **Runtime** (`lib.rs`): owns `ValueTable`, `Ingress`, `Gate<SystemClock>`, the registry of built-in actions (T3), and a map of sessions. `Runtime::open_session(client_name) -> SessionId` grants exactly the client's actions. `Runtime::literal(session, bytes) -> Handle` interns at the client's `literal_integrity` joined with `table.principal_label(session)`. `Runtime::call(session, action_name, args: Vec<Handle>) -> CallResult` invokes the gate and, on `Decision::Executed(Ok(Some(output)))`, interns `output.value` with `output.label` (never any other label). `Runtime::reveal(session, handle) -> Vec<u8>` goes through `SessionView::read`. `Runtime::extract(session, handle, schema)` goes through `fewshot_executor::host::Quarantine` with `OllamaReader`. `Runtime::run_task(session, request, inputs)` runs the planner and executor (approvals are handled by the caller, see T4).
+- **File audit sink** (`audit.rs`): implements `fewshot_gate::AuditSink`, attached with `Gate::set_audit_sink` right after the gate is created. One JSON object per line in `data_dir/audit/<yyyy-mm-dd>.jsonl`, `fsync` after each line, returning `SinkError` on any I/O error. `AuditEntry` has no serde derives (the gate is `no_std` and TCB), so write the mapping by hand in `audit.rs`; hashes as lowercase hex. Each line carries the entry and its chain hash. `fn load(dir) -> Result<Vec<AuditEntry>, AuditFileError>` re-verifies the chain across files.
 - **Tests:** config parse and every rejection; literal integrity; output labels after a tainted read; audit file survives reopen and detects an edited line.
 
 ## T3 — Built-in actions (runtime)
