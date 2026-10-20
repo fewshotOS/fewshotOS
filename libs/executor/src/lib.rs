@@ -64,6 +64,9 @@ pub enum PlannerError {
     Backend(String),
     /// The model's last plan did not parse or validate.
     Invalid(PlanError),
+    /// The model's last plan parsed and validated, but the linter still
+    /// rejected it (no call despite offered actions, or a let nobody reads).
+    Lint(String),
 }
 
 /// An action as the planner sees it.

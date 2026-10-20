@@ -51,7 +51,7 @@ impl Script {
 
 impl Chat for Script {
     fn chat(&mut self, req: &ChatRequest<'_>) -> Result<String, String> {
-        self.seen.push(format!("{}\n{}\n{}\n{}", req.model, req.system, req.user, req.format));
+        self.seen.push(format!("{}\n{}\n{}\n{}\n{}", req.model, req.system, req.user, req.format, req.options));
         self.replies.pop_front().map(String::from).ok_or_else(|| "script exhausted".into())
     }
 }
@@ -64,6 +64,16 @@ fn input(caps: &[ActionId]) -> PlannerInput {
 
 const GOOD: &str = r#"{"steps":[
     {"op":"read","var":"folder","input":"email","schema":{"kind":"choice","options":["inbox","archive"]}},
+    {"op":"call","action":4,"args":["folder"]}
+]}"#;
+
+/// A valid plan with no call at all.
+const NO_CALL: &str = r#"{"steps":[{"op":"checkpoint"}]}"#;
+
+/// A valid plan with a let nobody reads.
+const UNUSED_LET: &str = r#"{"steps":[
+    {"op":"read","var":"folder","input":"email","schema":{"kind":"choice","options":["inbox","archive"]}},
+    {"op":"let","var":"ghost","text":"a"},
     {"op":"call","action":4,"args":["folder"]}
 ]}"#;
 
@@ -96,7 +106,6 @@ fn planner_returns_a_valid_plan() {
     let mut planner = OllamaPlanner::new(Script::new([GOOD]), "planner", registry());
     let plan = planner.plan(&input(&[FILE])).unwrap();
     assert_eq!(plan, fewshot_plan::parse(GOOD).unwrap());
-    assert!(planner.chat().seen[0].contains(r#""$defs""#), "the plan schema is the format");
 }
 
 #[test]
@@ -126,6 +135,88 @@ fn plans_calling_actions_not_offered_are_invalid() {
     let mut planner = OllamaPlanner::new(Script::new([pay, pay, pay]), "planner", registry());
     let err = planner.plan(&input(&[FILE])).unwrap_err();
     assert!(matches!(err, PlannerError::Invalid(PlanError::UnknownAction { action: 8, .. })), "{err:?}");
+}
+
+#[test]
+fn lint_accepts_a_clean_plan() {
+    let plan = fewshot_plan::parse(GOOD).unwrap();
+    assert_eq!(fewshot_models::lint(&plan, 1), Ok(()));
+}
+
+#[test]
+fn lint_rejects_a_call_free_plan() {
+    let plan = fewshot_plan::parse(NO_CALL).unwrap();
+    assert_eq!(
+        fewshot_models::lint(&plan, 1).unwrap_err(),
+        "the plan calls no action; the request needs at least one call"
+    );
+}
+
+#[test]
+fn lint_allows_a_call_free_plan_when_no_actions_were_offered() {
+    let plan = fewshot_plan::parse(NO_CALL).unwrap();
+    assert_eq!(fewshot_models::lint(&plan, 0), Ok(()));
+}
+
+#[test]
+fn lint_rejects_an_unused_let() {
+    let plan = fewshot_plan::parse(UNUSED_LET).unwrap();
+    assert_eq!(fewshot_models::lint(&plan, 1).unwrap_err(), "`ghost` is bound but never used; remove it");
+}
+
+#[test]
+fn lint_rejects_an_unused_let_in_a_loop_body() {
+    let plan = fewshot_plan::parse(
+        r#"{"steps":[
+        {"op":"for_each","var":"m","list":"inbox","max":8,"body":[
+            {"op":"read","var":"folder","input":"m","schema":{"kind":"choice","options":["inbox","archive"]}},
+            {"op":"let","var":"ghost","text":"a"},
+            {"op":"call","action":4,"args":["folder"]}
+        ]}
+    ]}"#,
+    )
+    .unwrap();
+    assert_eq!(fewshot_models::lint(&plan, 1).unwrap_err(), "`ghost` is bound but never used; remove it");
+}
+
+#[test]
+fn planner_retries_after_a_lint_failure() {
+    let mut planner = OllamaPlanner::new(Script::new([NO_CALL, GOOD]), "planner", registry());
+    let plan = planner.plan(&input(&[FILE])).unwrap();
+    assert_eq!(plan, fewshot_plan::parse(GOOD).unwrap());
+    let seen = &planner.chat().seen;
+    assert_eq!(seen.len(), 2);
+    assert!(!seen[0].contains("Previous attempt failed"));
+    assert!(seen[1].contains("Previous attempt failed: the plan calls no action; the request needs at least one call"));
+}
+
+#[test]
+fn planner_and_reader_send_their_sampling_options() {
+    let mut planner = OllamaPlanner::new(Script::new([GOOD]), "planner", registry());
+    planner.plan(&input(&[FILE])).unwrap();
+    let seen = planner.chat().seen[0].clone();
+    assert!(seen.contains(r#""temperature":0.0"#));
+    assert!(seen.contains(r#""repeat_penalty":1.1"#));
+    assert!(seen.contains(r#""num_predict":2048"#));
+
+    let mut script = Script::new([r#""archive""#]);
+    let mut reader = OllamaReader::new(&mut script, "reader");
+    reader.extract(&Schema::Choice { options: vec!["inbox".into(), "archive".into()] }, b"old newsletter").unwrap();
+    let seen = script.seen[0].clone();
+    assert!(seen.contains(r#""temperature":0.0"#));
+    assert!(seen.contains(r#""num_predict":512"#));
+    assert!(!seen.contains("repeat_penalty"));
+}
+
+#[test]
+fn planner_format_leaves_step_shapes_to_the_validator() {
+    // Ollama sorts properties alphabetically in grammars, so a per-step schema
+    // would forbid every step but `let` and `checkpoint` after `{"op":`.
+    let mut planner = OllamaPlanner::new(Script::new([GOOD]), "planner", registry());
+    planner.plan(&input(&[FILE])).unwrap();
+    let format: serde_json::Value = serde_json::from_str(fewshot_models::PLANNER_FORMAT).unwrap();
+    assert_eq!(format["properties"]["steps"]["items"], serde_json::json!({ "type": "object" }));
+    assert!(planner.chat().seen[0].contains(&format.to_string()));
 }
 
 #[test]
