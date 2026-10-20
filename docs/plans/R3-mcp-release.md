@@ -129,8 +129,8 @@ New std crate `libs/runtime`.
 |---|---|---|---|---|
 | `fs.list` | Read | `dir` | root's label | Newline-separated names. |
 | `fs.read` | Read | `path` | root's label | Max 1 MiB. |
-| `fs.write` | LocalReversible | `path`, `content` | — | Before overwriting, copies the old file to `data_dir/undo/<digest>`; compensation is `fs.restore`. Integrity floor `SystemApp`. |
-| `fs.restore` | LocalReversible | `path`, `content` | — | Compensation of `fs.write`: `content` is the undo id. |
+| `fs.write` | LocalReversible | `path`, `content` | — | Before overwriting, copies the old file to `data_dir/undo/<sha256(path, content)>` (or writes an `.absent` marker); compensation is `fs.restore`. Integrity floor `SystemApp`. |
+| `fs.restore` | LocalReversible | `path`, `content` | — | Compensation of `fs.write`. The gate calls a compensation with the original arguments, so the backup is keyed by SHA-256 of (path, content); a file that did not exist is removed. |
 | `fs.delete` | LocalIrreversible | `path` | — | Queued; moves to `data_dir/trash/`. Floor `SystemApp`. |
 | `notes.append` | LocalReversible | `text` | — | Appends to `data_dir/notes.md`. Floor `ThirdParty`, so routine. |
 | `http.get` | Fetch | `url` | `UntrustedWeb`, no secrecy | `https` only, 2 MiB cap, 15 s timeout, via `ureq` with rustls. `Effect::Fetch` (#33) runs at once but is egress-checked: `egress_clearance` empty, so a URL carrying secret data, or a fetch after a secret was read, is refused. |
