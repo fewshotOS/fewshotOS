@@ -58,9 +58,9 @@ pub struct RecordingEffects {
 }
 
 impl Effects for RecordingEffects {
-    fn run(&mut self, action: &ActionSpec, args: &[&[u8]], _record: &AuditEntry) -> Result<(), EffectError> {
+    fn run(&mut self, action: &ActionSpec, args: &[&[u8]], _record: &AuditEntry) -> Result<Vec<u8>, EffectError> {
         self.effects.push(RecordedEffect { action: action.id, args: args.iter().map(|a| a.to_vec()).collect() });
-        Ok(())
+        Ok(Vec::new())
     }
 }
 
@@ -156,6 +156,7 @@ mod tests {
             params,
             draft_for: None,
             compensation: None,
+            output: None,
         };
         r.register(mk(SEND, Effect::External, Integrity::User, vec![Param::open("to")])).unwrap();
         r.register(mk(

@@ -35,6 +35,7 @@ pub fn registry() -> Registry {
         params,
         draft_for: None,
         compensation: None,
+        output: None,
     };
     let to_body = || vec![Param::open("to"), Param::open("body")];
     r.register(mk(READ, "doc.read", Effect::Read, Integrity::UntrustedWeb, vec![Param::open("doc")])).unwrap();
@@ -83,9 +84,9 @@ impl Recorder {
 }
 
 impl Effects for Recorder {
-    fn run(&mut self, action: &ActionSpec, args: &[&[u8]], _record: &AuditEntry) -> Result<(), EffectError> {
+    fn run(&mut self, action: &ActionSpec, args: &[&[u8]], _record: &AuditEntry) -> Result<Vec<u8>, EffectError> {
         self.calls.push((action.id, args.iter().map(|a| a.to_vec()).collect()));
-        if self.fail_on == Some(action.id) { Err(EffectError("boom".into())) } else { Ok(()) }
+        if self.fail_on == Some(action.id) { Err(EffectError("boom".into())) } else { Ok(Vec::new()) }
     }
 }
 

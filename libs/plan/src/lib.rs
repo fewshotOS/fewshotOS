@@ -467,6 +467,7 @@ mod tests {
             params: alloc::vec![Param::open("to"), Param::open("body")],
             draft_for: None,
             compensation: None,
+            output: None,
         })
         .unwrap();
         r.register(ActionSpec {
@@ -478,6 +479,7 @@ mod tests {
             params: alloc::vec![Param::open("text")],
             draft_for: None,
             compensation: None,
+            output: None,
         })
         .unwrap();
         r

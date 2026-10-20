@@ -7,7 +7,7 @@ The R1 crates ([#2](https://github.com/fewshotOS/fewshotos/issues/2)): portable,
 | [`fewshot-labels`](labels) | Secrecy tags, integrity levels (including `Bounded`), `join` and `flows_to`. Same laws as `specs/verus/labels.rs`, property-tested |
 | [`fewshot-labeld`](labeld) | The value table (ADR-0005): labeled values behind session-scoped handles. Labels are set only through an `Ingress` capability and computed by `derive`; agents never choose them. Agents get a `SessionView` (read and derive only); every read raises the session's principal label, and every derived value carries it |
 | [`fewshot-host`](host) | Host abstraction (`Clock`), with `SystemClock` (std) and `ManualClock` |
-| [`fewshot-gate`](gate) | Capability check, integrity floors and bounded choices, egress clearance, outbox with commit/abort, structured refusals, hash-chained audit log, Ed25519 digest-bound single-use approvals (ADR-0006). Action metadata for drafts (`draft_for`) and compensations. Every call is also checked against the session's principal label, so implicit flows count |
+| [`fewshot-gate`](gate) | Capability check, integrity floors and bounded choices, egress clearance, outbox with commit/abort, structured refusals, hash-chained audit log, Ed25519 digest-bound single-use approvals (ADR-0006). Action metadata for drafts (`draft_for`) and compensations. Every call is also checked against the session's principal label, so implicit flows count. R3: immediate effects return outputs labeled by the gate (declared output label joined with the call's label), and an `AuditSink` must store each effect's start entry before it runs |
 | [`fewshot-plan`](plan) | R2. The plan DSL: `Let`, `Call`, `Read`, `ForEach`, `If`, `Checkpoint`; JSON wire format, JSON schema for constrained decoding, and a validator (scopes, arity, loop and depth limits). `no_std` |
 | [`fewshot-executor`](executor) | R2. Runs plans on value handles through the gate: drafts by default, approval pause and resume, checkpoints, saga compensation in reverse order. Readers run behind a `ReaderHost`; certified choices are the only way integrity rises, and only to `Bounded`. `no_std` |
 | [`fewshot-models`](models) | R2, std. Planner and reader backed by a local Ollama (Qwen by default). Reader output is schema-constrained; plans are JSON-constrained, then validated and linted (calls no action, unused `let`) with errors fed back for retries. The planner sees only the request, action summaries and input names, never untrusted bytes |
@@ -31,10 +31,11 @@ cargo test -p fewshot-models -- --ignored                # live round trips; nee
 | `i1_no_ambient_authority` | No capability, no effect; attenuated delegation cannot widen; unknown sessions refused |
 | `i2_untrusted_data_cannot_steer` | Tainted arguments need approval and do nothing until approved; taint survives `derive`; `Bounded` values may only pick pre-approved options; a call after a tainted read needs approval even with clean arguments |
 | `i3_no_uncleared_egress` | Uncleared secrecy cannot leave; approval does not declassify; secrets read before a call cannot leave through it; local effects are not egress |
-| `i4_audit_before_effect` | Every effect receives its own `EffectStarted` entry, already in the log; refusals and requests are audited; chain verifies |
+| `i4_audit_before_effect` | Every effect receives its own `EffectStarted` entry, already in the log; refusals and requests are audited; chain verifies; a failing sink stops effects, and the sink catches up in order |
 | `i5_reversible_until_commit` | External and irreversible effects wait for commit; abort and close drop them unrun; commit runs in order and stops at the first failure |
 | `adr_0005_labels_from_the_table` | Handles from another session do not resolve |
 | `adr_0006_approvals` | A modified argument invalidates the approval; forged digest, reuse, expiry, wrong key and wrong session are all rejected |
+| `outputs` | Outputs carry the declared label joined with argument labels and the principal label; returned bytes are audited by hash; undeclared outputs and outputs from queued effects fail |
 | `oracle` | Property tests: the gate's decisions match a direct statement of its rules, including the session's principal label |
 
 Each suite was checked against a deliberately broken gate (capability, egress, floor, digest, single-use and audit-order checks removed one at a time; external effects run immediately). Every break fails at least one test.
@@ -61,6 +62,5 @@ The oracle judges bytes, so it cannot see an implicit flow, where untrusted or s
 
 - Store branches for local-reversible writes (M2); the gate runs them immediately.
 - Budgets in the gate (time, money, rate).
-- Action outputs: actions return `()`, and data enters only through host `Ingress` (R3).
 - Batched approvals and standing policies (ADR-0006) and declassification.
-- Persistent audit storage; the log is in memory.
+- Persistent audit storage: the gate has an `AuditSink`; the file sink is R3/T2.

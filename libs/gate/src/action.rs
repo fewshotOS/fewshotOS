@@ -3,7 +3,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use fewshot_labels::{Integrity, Secrecy};
+use fewshot_labels::{Integrity, Label, Secrecy};
 
 /// Identifies a registered action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -80,6 +80,9 @@ pub struct ActionSpec {
     pub draft_for: Option<ActionId>,
     /// Action that undoes this one; called with the same arguments.
     pub compensation: Option<ActionId>,
+    /// Label of what the action returns, if it returns anything. The gate
+    /// joins it with the call's label. Only immediate effects may return.
+    pub output: Option<Label>,
 }
 
 /// Two actions registered with the same id.
@@ -123,6 +126,9 @@ pub enum RegistryError {
         /// Its compensation.
         compensation: ActionId,
     },
+    /// A queued (irreversible or external) action declares an output; it runs
+    /// at commit, when nobody is waiting for a value.
+    OutputOnQueuedEffect(ActionId),
 }
 
 /// Registered actions.
@@ -165,6 +171,9 @@ impl Registry {
     pub fn validate(&self) -> Result<(), RegistryError> {
         let mut drafts: BTreeMap<ActionId, ActionId> = BTreeMap::new();
         for a in self.iter() {
+            if a.output.is_some() && !a.effect.is_immediate() {
+                return Err(RegistryError::OutputOnQueuedEffect(a.id));
+            }
             if let Some(target) = a.draft_for {
                 let t = self.get(target).ok_or(RegistryError::UnknownTarget { action: a.id, target })?;
                 if t.effect != Effect::External {
@@ -212,6 +221,7 @@ mod tests {
             params: (0..params).map(|_| Param::open("p")).collect(),
             draft_for: None,
             compensation: None,
+            output: None,
         }
     }
 
@@ -296,6 +306,25 @@ mod tests {
             spec(UNSEND, Effect::External, 1),
         ]);
         assert_eq!(r.validate(), Err(RegistryError::CompensationArity { action: SEND, compensation: UNSEND }));
+    }
+
+    #[test]
+    fn immediate_effects_may_declare_an_output() {
+        let out = Some(Label::new(Secrecy::EMPTY, Integrity::UntrustedWeb));
+        let r = registry([
+            ActionSpec { output: out, ..spec(NOTE, Effect::Read, 1) },
+            ActionSpec { output: out, ..spec(DRAFT, Effect::LocalReversible, 1) },
+        ]);
+        assert_eq!(r.validate(), Ok(()));
+    }
+
+    #[test]
+    fn queued_effects_cannot_declare_an_output() {
+        let out = Some(Label::TOP);
+        for effect in [Effect::LocalIrreversible, Effect::External] {
+            let r = registry([ActionSpec { output: out, ..spec(SEND, effect, 1) }]);
+            assert_eq!(r.validate(), Err(RegistryError::OutputOnQueuedEffect(SEND)));
+        }
     }
 
     #[test]

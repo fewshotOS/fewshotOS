@@ -44,6 +44,7 @@ pub fn registry() -> Registry {
         params,
         draft_for: None,
         compensation: None,
+        output: None,
     };
     let specs = [
         mk(SEND, "mail.send", Effect::External, Integrity::User, vec![Param::open("to"), Param::open("body")]),

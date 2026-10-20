@@ -4,6 +4,8 @@
 use fewshot_gate::*;
 use fewshot_host::{Clock, ManualClock};
 use fewshot_labeld::{Handle, Ingress, Integrity, Label, Secrecy, SessionId, Tag, ValueTable};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 pub const S1: SessionId = SessionId(1);
 pub const S2: SessionId = SessionId(2);
@@ -33,6 +35,7 @@ pub fn registry() -> Registry {
         params,
         draft_for: None,
         compensation: None,
+        output: None,
     };
     r.register(mk(READ, "doc.read", Effect::Read, Integrity::UntrustedWeb, Secrecy::EMPTY, vec![Param::open("doc")]))
         .unwrap();
@@ -75,12 +78,35 @@ pub fn all_caps() -> CapSet {
 pub struct Recorder {
     pub calls: Vec<(ActionId, Vec<Vec<u8>>, AuditEntry)>,
     pub fail_on: Option<ActionId>,
+    /// Bytes every successful effect returns.
+    pub returns: Vec<u8>,
 }
 
 impl Effects for Recorder {
-    fn run(&mut self, action: &ActionSpec, args: &[&[u8]], record: &AuditEntry) -> Result<(), EffectError> {
+    fn run(&mut self, action: &ActionSpec, args: &[&[u8]], record: &AuditEntry) -> Result<Vec<u8>, EffectError> {
         self.calls.push((action.id, args.iter().map(|a| a.to_vec()).collect(), *record));
-        if self.fail_on == Some(action.id) { Err(EffectError("boom".into())) } else { Ok(()) }
+        if self.fail_on == Some(action.id) { Err(EffectError("boom".into())) } else { Ok(self.returns.clone()) }
+    }
+}
+
+/// An audit sink the test can inspect and make fail.
+#[derive(Clone, Default)]
+pub struct SharedSink(pub Rc<RefCell<SinkState>>);
+
+#[derive(Default)]
+pub struct SinkState {
+    pub stored: Vec<AuditEntry>,
+    pub failing: bool,
+}
+
+impl AuditSink for SharedSink {
+    fn append(&mut self, entry: &AuditEntry) -> Result<(), SinkError> {
+        let mut s = self.0.borrow_mut();
+        if s.failing {
+            return Err(SinkError("disk full".into()));
+        }
+        s.stored.push(*entry);
+        Ok(())
     }
 }
 
@@ -99,9 +125,13 @@ impl World {
     }
 
     pub fn with_caps(caps: CapSet) -> Self {
+        Self::with_registry(registry(), caps)
+    }
+
+    pub fn with_registry(registry: Registry, caps: CapSet) -> Self {
         let clock: &'static ManualClock = Box::leak(Box::new(ManualClock::new(1_000)));
         let approver = Approver::from_secret([7; 32]);
-        let mut gate = Gate::new(registry(), approver.verifying_key(), clock);
+        let mut gate = Gate::new(registry, approver.verifying_key(), clock);
         gate.open_session(S1, caps);
         let (table, ingress) = ValueTable::new();
         World { gate, table, ingress, approver, fx: Recorder::default(), clock }
@@ -140,7 +170,7 @@ pub fn assert_audit_before_effect(log: &AuditLog) {
     log.verify().expect("audit chain intact");
     let entries = log.entries();
     for (i, e) in entries.iter().enumerate() {
-        if matches!(e.kind, AuditKind::EffectSucceeded | AuditKind::EffectFailed) {
+        if matches!(e.kind, AuditKind::EffectSucceeded | AuditKind::EffectReturned(_) | AuditKind::EffectFailed) {
             assert!(
                 entries[..i].iter().any(|s| s.kind == AuditKind::EffectStarted && s.digest == e.digest),
                 "outcome at {i} has no earlier EffectStarted"

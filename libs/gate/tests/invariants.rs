@@ -85,7 +85,7 @@ mod i2_untrusted_data_cannot_steer {
         let cond = w.value(S1, b"x", Label::new(Secrecy::EMPTY, Integrity::ThirdParty));
         w.table.view(S1).read(cond).unwrap();
         let text = w.user(b"note");
-        assert!(matches!(w.invoke(&Invocation::new(NOTE, [text])), Ok(Decision::Executed(Ok(())))));
+        assert!(matches!(w.invoke(&Invocation::new(NOTE, [text])), Ok(Decision::Executed(Ok(None)))));
     }
 
     #[test]
@@ -165,7 +165,7 @@ mod i3_no_uncleared_egress {
     fn local_effects_are_not_egress() {
         let mut w = World::new();
         let text = w.value(S1, b"diagnosis", Label::new(Secrecy::EMPTY.with(HEALTH), Integrity::User));
-        assert!(matches!(w.invoke(&Invocation::new(NOTE, [text])), Ok(Decision::Executed(Ok(())))));
+        assert!(matches!(w.invoke(&Invocation::new(NOTE, [text])), Ok(Decision::Executed(Ok(None)))));
     }
 }
 
@@ -204,6 +204,148 @@ mod i4_audit_before_effect {
         assert!(kinds.contains(&AuditKind::Refused(Reason::MissingCapability)));
         assert!(kinds.iter().any(|k| matches!(k, AuditKind::ApprovalRequested(_))));
         assert_audit_before_effect(w.gate.audit());
+    }
+
+    #[test]
+    fn sink_stores_every_entry_in_order() {
+        let mut w = World::new();
+        let sink = SharedSink::default();
+        w.gate.set_audit_sink(Box::new(sink.clone()));
+        let note = w.user(b"note");
+        w.invoke(&Invocation::new(NOTE, [note])).unwrap();
+        let (to, body) = (w.user(b"a@b.example"), w.user(b"hi"));
+        w.invoke(&Invocation::new(SEND, [to, body])).unwrap();
+        w.commit();
+        assert_eq!(sink.0.borrow().stored, w.gate.audit().entries(), "including entries from before the sink");
+        assert!(w.gate.audit_stored());
+    }
+
+    #[test]
+    fn failing_sink_stops_the_effect() {
+        let mut w = World::new();
+        let sink = SharedSink::default();
+        w.gate.set_audit_sink(Box::new(sink.clone()));
+        let (to, body) = (w.user(b"a@b.example"), w.user(b"hi"));
+        w.invoke(&Invocation::new(SEND, [to, body])).unwrap();
+        sink.0.borrow_mut().failing = true;
+
+        let note = w.user(b"note");
+        let Ok(Decision::Executed(Err(_))) = w.invoke(&Invocation::new(NOTE, [note])) else {
+            panic!("expected the immediate effect to fail")
+        };
+        let report = w.commit();
+        assert!(report.failed.is_some());
+        assert!(report.executed.is_empty());
+        assert!(w.fx.calls.is_empty(), "no effect ran without a stored start entry");
+        assert!(!w.gate.audit_stored());
+        assert_audit_before_effect(w.gate.audit());
+    }
+
+    #[test]
+    fn sink_catches_up_after_a_failure() {
+        let mut w = World::new();
+        let sink = SharedSink::default();
+        w.gate.set_audit_sink(Box::new(sink.clone()));
+        sink.0.borrow_mut().failing = true;
+        let note = w.user(b"note");
+        let _ = w.invoke(&Invocation::new(NOTE, [note]));
+        sink.0.borrow_mut().failing = false;
+
+        assert_eq!(w.invoke(&Invocation::new(NOTE, [note])), Ok(Decision::Executed(Ok(None))));
+        assert_eq!(w.fx.calls.len(), 1);
+        assert_eq!(sink.0.borrow().stored, w.gate.audit().entries(), "the backlog is stored, in order, once");
+    }
+}
+
+mod outputs {
+    use super::*;
+    use fewshot_labeld::Handle;
+    use sha2::{Digest as _, Sha256};
+
+    const FETCH: ActionId = ActionId(5);
+
+    /// The fixture registry plus `FETCH`, a read returning `SystemApp` data tagged `HEALTH`.
+    fn world() -> World {
+        let mut r = registry();
+        r.register(ActionSpec {
+            id: FETCH,
+            name: "doc.fetch".into(),
+            effect: Effect::Read,
+            integrity_floor: Integrity::UntrustedWeb,
+            egress_clearance: Secrecy::EMPTY,
+            params: vec![Param::open("doc")],
+            draft_for: None,
+            compensation: None,
+            output: Some(Label::new(Secrecy::EMPTY.with(HEALTH), Integrity::SystemApp)),
+        })
+        .unwrap();
+        r.validate().unwrap();
+        let mut w = World::with_registry(r, CapSet::new([READ, NOTE, SEND, FETCH]));
+        w.fx.returns = b"contents".to_vec();
+        w
+    }
+
+    fn fetch(w: &mut World, arg: Handle) -> Output {
+        match w.invoke(&Invocation::new(FETCH, [arg])) {
+            Ok(Decision::Executed(Ok(Some(out)))) => out,
+            other => panic!("expected an output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn output_carries_the_declared_label() {
+        let mut w = world();
+        let doc = w.user(b"doc");
+        let out = fetch(&mut w, doc);
+        assert_eq!(out.value, b"contents");
+        assert_eq!(out.label, Label::new(Secrecy::EMPTY.with(HEALTH), Integrity::SystemApp));
+    }
+
+    #[test]
+    fn output_joins_the_arguments_labels() {
+        let mut w = world();
+        let doc = w.value(S1, b"doc", Label::new(Secrecy::EMPTY.with(WORK), Integrity::UntrustedWeb));
+        let out = fetch(&mut w, doc);
+        assert_eq!(out.label, Label::new(Secrecy::EMPTY.with(WORK).with(HEALTH), Integrity::UntrustedWeb));
+    }
+
+    #[test]
+    fn output_joins_the_sessions_principal_label() {
+        let mut w = world();
+        let page = w.web(b"page");
+        w.table.view(S1).read(page).unwrap();
+        let doc = w.user(b"doc");
+        let out = fetch(&mut w, doc);
+        assert_eq!(out.label.integrity, Integrity::UntrustedWeb, "a read steered by tainted context is tainted");
+    }
+
+    #[test]
+    fn returned_output_is_audited_by_hash() {
+        let mut w = world();
+        let doc = w.user(b"doc");
+        fetch(&mut w, doc);
+        let hash: [u8; 32] = Sha256::digest(b"contents").into();
+        assert!(w.gate.audit().entries().iter().any(|e| e.kind == AuditKind::EffectReturned(hash)));
+        assert_audit_before_effect(w.gate.audit());
+    }
+
+    #[test]
+    fn undeclared_output_fails_the_effect() {
+        let mut w = world();
+        let note = w.user(b"note");
+        let Ok(Decision::Executed(Err(_))) = w.invoke(&Invocation::new(NOTE, [note])) else {
+            panic!("expected the effect to fail")
+        };
+        assert_eq!(w.gate.audit().entries().last().unwrap().kind, AuditKind::EffectFailed);
+    }
+
+    #[test]
+    fn queued_effects_return_nothing() {
+        let mut w = world();
+        let (to, body) = (w.user(b"a@b.example"), w.user(b"hi"));
+        w.invoke(&Invocation::new(SEND, [to, body])).unwrap();
+        let report = w.commit();
+        assert!(report.failed.is_some(), "an outbox effect returning bytes fails");
     }
 }
 
@@ -444,7 +586,7 @@ mod oracle {
             let h = w.value(S1, b"text", Label::new(Secrecy::from_bits(s), i));
             let d = w.invoke(&Invocation::new(NOTE, [h])).unwrap();
             if i >= Integrity::ThirdParty {
-                prop_assert_eq!(d, Decision::Executed(Ok(())));
+                prop_assert_eq!(d, Decision::Executed(Ok(None)));
                 prop_assert_eq!(w.fx.calls.len(), 1);
             } else {
                 prop_assert!(matches!(d, Decision::NeedsApproval(_)));
