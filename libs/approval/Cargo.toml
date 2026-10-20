@@ -1,0 +1,23 @@
+[package]
+name = "fewshot-approval"
+description = "Approval wire protocol, templates, batching and keys for the Fewshot approval app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+fewshot-gate.workspace = true
+fewshot-labeld.workspace = true
+serde = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std"] }
+interprocess = "2.4.6"
+getrandom = "0.4.3"
+
+[dev-dependencies]
+fewshot-host = { workspace = true, features = ["std"] }
+tempfile = "3.27.0"
+
+[lints]
+workspace = true
+
