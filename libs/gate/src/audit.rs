@@ -3,6 +3,7 @@
 use crate::action::ActionId;
 use crate::approval::{Digest, Nonce};
 use crate::refusal::Reason;
+use alloc::string::String;
 use alloc::vec::Vec;
 use fewshot_labeld::SessionId;
 use sha2::{Digest as _, Sha256};
@@ -22,6 +23,8 @@ pub enum AuditKind {
     Queued,
     /// The effect completed.
     EffectSucceeded,
+    /// The effect completed and returned an output; SHA-256 of its bytes.
+    EffectReturned([u8; 32]),
     /// The effect failed.
     EffectFailed,
     /// Queued effects were dropped without running (abort, or a failed commit).
@@ -51,6 +54,18 @@ pub struct AuditEntry {
     pub hash: [u8; 32],
 }
 
+/// Durable storage for audit entries, such as an append-only file. The gate
+/// runs an effect only once every entry up to and including its
+/// [`AuditKind::EffectStarted`] has been stored (I4).
+pub trait AuditSink {
+    /// Stores `entry`, which follows the last entry stored.
+    fn append(&mut self, entry: &AuditEntry) -> Result<(), SinkError>;
+}
+
+/// An [`AuditSink`] could not store an entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SinkError(pub String);
+
 /// The audit log. Append-only; each entry hashes the previous one.
 #[derive(Clone, Debug, Default)]
 pub struct AuditLog {
@@ -65,14 +80,7 @@ impl AuditLog {
 
     /// Checks the hash chain; returns the first broken position.
     pub fn verify(&self) -> Result<(), u64> {
-        let mut prev = [0u8; 32];
-        for e in &self.entries {
-            if e.prev != prev || e.hash != entry_hash(e) {
-                return Err(e.seq);
-            }
-            prev = e.hash;
-        }
-        Ok(())
+        verify_chain(&self.entries)
     }
 
     pub(crate) fn append(
@@ -95,6 +103,24 @@ impl AuditLog {
     pub(crate) fn entries_mut(&mut self) -> &mut Vec<AuditEntry> {
         &mut self.entries
     }
+}
+
+/// Checks a whole log read back from storage: it starts at `seq` 0 with a
+/// zero `prev`, numbers entries consecutively, and every hash matches.
+/// Returns the `seq` of the first broken entry (or its position, if `seq`
+/// is wrong).
+pub fn verify_chain(entries: &[AuditEntry]) -> Result<(), u64> {
+    let mut prev = [0u8; 32];
+    for (i, e) in entries.iter().enumerate() {
+        if e.seq != i as u64 {
+            return Err(i as u64);
+        }
+        if e.prev != prev || e.hash != entry_hash(e) {
+            return Err(e.seq);
+        }
+        prev = e.hash;
+    }
+    Ok(())
 }
 
 fn entry_hash(e: &AuditEntry) -> [u8; 32] {
@@ -122,9 +148,13 @@ fn entry_hash(e: &AuditEntry) -> [u8; 32] {
         AuditKind::EffectFailed => (6, 0),
         AuditKind::OutboxDropped(n) => (7, u64::from(n)),
         AuditKind::SessionClosed => (8, 0),
+        AuditKind::EffectReturned(_) => (9, 0),
     };
     h.update([code]);
     h.update(payload.to_le_bytes());
+    if let AuditKind::EffectReturned(output) = e.kind {
+        h.update(output);
+    }
     h.finalize().into()
 }
 
@@ -162,5 +192,27 @@ mod tests {
         assert_eq!(log.verify(), Ok(()));
         log.entries_mut()[1].kind = AuditKind::EffectSucceeded;
         assert_eq!(log.verify(), Err(1));
+    }
+
+    #[test]
+    fn verify_chain_rejects_dropped_or_reordered_entries() {
+        let mut log = AuditLog::default();
+        for i in 0..3 {
+            log.append(i, SessionId(1), None, None, AuditKind::SessionOpened);
+        }
+        let all = log.entries();
+        assert_eq!(verify_chain(all), Ok(()));
+        assert_eq!(verify_chain(&all[1..]), Err(0), "a log must start at seq 0");
+        assert_eq!(verify_chain(&[all[0], all[2]]), Err(1), "no gaps");
+        assert_eq!(verify_chain(&[all[0], all[2], all[1]]), Err(1));
+    }
+
+    #[test]
+    fn output_hash_is_chained() {
+        let mut log = AuditLog::default();
+        log.append(0, SessionId(1), Some(ActionId(7)), None, AuditKind::EffectReturned([1; 32]));
+        assert_eq!(log.verify(), Ok(()));
+        log.entries_mut()[0].kind = AuditKind::EffectReturned([2; 32]);
+        assert_eq!(log.verify(), Err(0));
     }
 }

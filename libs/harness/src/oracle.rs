@@ -15,7 +15,7 @@
 //! that happens to contain tainted bytes counts as tainted), which can only
 //! report more violations, never fewer.
 
-use fewshot_gate::{ActionId, ActionSpec, AuditEntry, Effect, EffectError, Effects, ParamKind, Registry};
+use fewshot_gate::{ActionId, ActionSpec, AuditEntry, EffectError, Effects, ParamKind, Registry};
 use fewshot_labeld::{Integrity, Label};
 
 /// Which rule a violation breaks.
@@ -58,9 +58,9 @@ pub struct RecordingEffects {
 }
 
 impl Effects for RecordingEffects {
-    fn run(&mut self, action: &ActionSpec, args: &[&[u8]], _record: &AuditEntry) -> Result<(), EffectError> {
+    fn run(&mut self, action: &ActionSpec, args: &[&[u8]], _record: &AuditEntry) -> Result<Vec<u8>, EffectError> {
         self.effects.push(RecordedEffect { action: action.id, args: args.iter().map(|a| a.to_vec()).collect() });
-        Ok(())
+        Ok(Vec::new())
     }
 }
 
@@ -124,7 +124,7 @@ impl RecordingEffects {
                 if label.integrity < spec.integrity_floor && !bounded_choice {
                     push(e, Rule::BelowIntegrityFloor { arg: i, label });
                 }
-                if spec.effect == Effect::External && !label.secrecy.is_subset(spec.egress_clearance) {
+                if spec.effect.leaves_device() && !label.secrecy.is_subset(spec.egress_clearance) {
                     push(e, Rule::EgressNotCleared { arg: i, label });
                 }
             }
@@ -139,7 +139,7 @@ impl RecordingEffects {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fewshot_gate::Param;
+    use fewshot_gate::{Effect, Param};
     use fewshot_labeld::Secrecy;
 
     const SEND: ActionId = ActionId(1);
@@ -156,6 +156,7 @@ mod tests {
             params,
             draft_for: None,
             compensation: None,
+            output: None,
         };
         r.register(mk(SEND, Effect::External, Integrity::User, vec![Param::open("to")])).unwrap();
         r.register(mk(

@@ -18,6 +18,7 @@ fn registry() -> Registry {
         params: vec![Param::choice("folder", [b"inbox".to_vec(), b"archive".to_vec()])],
         draft_for: None,
         compensation: None,
+        output: None,
     })
     .unwrap();
     r

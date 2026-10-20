@@ -502,7 +502,8 @@ impl<'p> Executor<'p> {
         result: Result<Decision, Refusal>,
     ) -> Option<Outcome> {
         match result {
-            Ok(Decision::Executed(Ok(()))) => {
+            // `Call` binds no result, so an output is not kept.
+            Ok(Decision::Executed(Ok(_))) => {
                 if let Some(release_action) = release {
                     self.drafts.push(Draft { draft_action: inv.action, release_action, args: inv.args });
                 }

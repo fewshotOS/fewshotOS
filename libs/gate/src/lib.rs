@@ -4,13 +4,18 @@
 //! 1. **Capability** — the session must hold one for the action (I1).
 //! 2. **Labels** — argument labels are resolved from the [`ValueTable`], never
 //!    taken from the caller (ADR-0005).
-//! 3. **Egress** — external effects may carry only cleared secrecy (I3).
+//! 3. **Egress** — effects that leave the device (external sends and remote
+//!    fetches) may carry only cleared secrecy (I3).
 //! 4. **Integrity floor** — arguments below it need a signed approval bound to
 //!    this exact invocation (I2, ADR-0006). `Bounded` values may fill
 //!    [`ParamKind::Choice`] parameters with a pre-approved option.
 //! 5. **Audit, then effect** — every decision is logged before any effect
-//!    runs (I4). Irreversible and external effects wait in the session's
-//!    outbox until [`Gate::commit`]; [`Gate::abort`] drops them unrun (I5).
+//!    runs (I4), and with an [`AuditSink`] attached, stored there first.
+//!    Irreversible and external effects wait in the session's outbox until
+//!    [`Gate::commit`]; [`Gate::abort`] drops them unrun (I5).
+//!
+//! Immediate effects may return an [`Output`], labeled by the gate with the
+//! action's declared output label joined with the call's label.
 //!
 //! The ordering and approval rules are model-checked in `specs/tla/Txn.tla`;
 //! the decision logic mirrors `specs/verus/gate.rs`.
@@ -26,11 +31,12 @@ mod refusal;
 
 pub use action::{ActionId, ActionSpec, DuplicateAction, Effect, Param, ParamKind, Registry, RegistryError};
 pub use approval::{ApprovalRequest, Approver, ArgSummary, Digest, Nonce, SignedApproval, signed_message};
-pub use audit::{AuditEntry, AuditKind, AuditLog};
+pub use audit::{AuditEntry, AuditKind, AuditLog, AuditSink, SinkError, verify_chain};
 pub use caps::CapSet;
 pub use ed25519_dalek::VerifyingKey;
 pub use refusal::{ApprovalError, Grantor, Reason, Refusal};
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -38,6 +44,7 @@ use alloc::vec::Vec;
 use approval::{invocation_digest, verify};
 use fewshot_host::Clock;
 use fewshot_labeld::{Handle, Integrity, Label, Provenance, Resolved, SessionId, ValueTable};
+use sha2::{Digest as _, Sha256};
 
 /// An effect implementation failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,9 +53,21 @@ pub struct EffectError(pub String);
 /// Runs effects. Implemented by the host; the gate calls it only after the
 /// effect's audit entry exists, and passes that entry in.
 pub trait Effects {
-    /// Runs `action` with resolved argument values. `record.digest` is the
-    /// effect's idempotency key.
-    fn run(&mut self, action: &ActionSpec, args: &[&[u8]], record: &AuditEntry) -> Result<(), EffectError>;
+    /// Runs `action` with resolved argument values and returns its output,
+    /// empty for actions that declare none. `record.digest` is the effect's
+    /// idempotency key.
+    fn run(&mut self, action: &ActionSpec, args: &[&[u8]], record: &AuditEntry) -> Result<Vec<u8>, EffectError>;
+}
+
+/// What an immediate effect returned, labeled by the gate. The host brings
+/// it into the value table with exactly this label.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Output {
+    /// The bytes the effect returned.
+    pub value: Vec<u8>,
+    /// The action's output label joined with the call's label: every
+    /// argument and the session's principal label.
+    pub label: Label,
 }
 
 /// A call to an action. Carries value handles, never labels.
@@ -78,8 +97,9 @@ impl Invocation {
 /// What the gate did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Decision {
-    /// Read or local-reversible effect: ran now.
-    Executed(Result<(), EffectError>),
+    /// Read or local-reversible effect: ran now. `Some` for actions that
+    /// declare an output.
+    Executed(Result<Option<Output>, EffectError>),
     /// Irreversible or external effect: queued until commit.
     Queued {
         /// Position in the outbox.
@@ -119,6 +139,9 @@ pub struct Gate<C> {
     approval_key: VerifyingKey,
     clock: C,
     audit: AuditLog,
+    sink: Option<Box<dyn AuditSink>>,
+    /// How many audit entries the sink has stored.
+    stored: usize,
     sessions: BTreeMap<SessionId, SessionState>,
     pending: BTreeMap<Nonce, (SessionId, Digest)>,
     used: BTreeSet<Nonce>,
@@ -133,6 +156,8 @@ impl<C: Clock> Gate<C> {
             approval_key,
             clock,
             audit: AuditLog::default(),
+            sink: None,
+            stored: 0,
             sessions: BTreeMap::new(),
             pending: BTreeMap::new(),
             used: BTreeSet::new(),
@@ -148,6 +173,20 @@ impl<C: Clock> Gate<C> {
     /// The audit log.
     pub fn audit(&self) -> &AuditLog {
         &self.audit
+    }
+
+    /// Attaches durable audit storage. It first receives every entry no
+    /// earlier sink stored, then each new entry as it is appended. Entries
+    /// the sink fails to store are retried on the next append, and no effect
+    /// runs until they are stored.
+    pub fn set_audit_sink(&mut self, sink: Box<dyn AuditSink>) {
+        self.sink = Some(sink);
+        let _ = self.flush();
+    }
+
+    /// Whether the sink holds every entry (always true without a sink).
+    pub fn audit_stored(&self) -> bool {
+        self.sink.is_none() || self.stored == self.audit.entries().len()
     }
 
     /// Opens a session holding `caps`.
@@ -250,7 +289,7 @@ impl<C: Clock> Gate<C> {
         let context_below_floor = context.integrity < spec.integrity_floor;
 
         // 3. Egress (I3).
-        if spec.effect == Effect::External && !label.secrecy.is_subset(spec.egress_clearance) {
+        if spec.effect.leaves_device() && !label.secrecy.is_subset(spec.egress_clearance) {
             let detail = format!(
                 "{} would send secrecy {:?} beyond clearance {:?}",
                 spec.name, label.secrecy, spec.egress_clearance
@@ -294,7 +333,7 @@ impl<C: Clock> Gate<C> {
         // 5. Audit, then route (I4, I5).
         if spec.effect.is_immediate() {
             let args: Vec<&[u8]> = resolved.iter().map(|r| r.value).collect();
-            let result = self.run_effect(session, &spec, digest, &args, effects);
+            let result = self.run_effect(session, &spec, digest, &args, Some(label), effects);
             Ok(Decision::Executed(result))
         } else {
             self.log(session, act, Some(digest), AuditKind::Queued);
@@ -329,14 +368,14 @@ impl<C: Clock> Gate<C> {
             let values: Result<Vec<&[u8]>, _> =
                 q.args.iter().map(|&h| table.resolve(session, h).map(|r| r.value)).collect();
             let result = match values {
-                Ok(args) => self.run_effect(session, &spec, q.digest, &args, effects),
+                Ok(args) => self.run_effect(session, &spec, q.digest, &args, None, effects),
                 Err(e) => {
                     self.log(session, Some(q.action), Some(q.digest), AuditKind::EffectFailed);
                     Err(EffectError(e.to_string()))
                 }
             };
             match result {
-                Ok(()) => report.executed.push(q.digest),
+                Ok(_) => report.executed.push(q.digest),
                 Err(e) => {
                     report.failed = Some((q.digest, e));
                     break;
@@ -367,20 +406,46 @@ impl<C: Clock> Gate<C> {
         Ok(n)
     }
 
+    /// Runs one effect after its `EffectStarted` entry is logged and stored.
+    /// `call` is the call's label for immediate effects; queued effects
+    /// (`None`) return no output.
     fn run_effect(
         &mut self,
         session: SessionId,
         spec: &ActionSpec,
         digest: Digest,
         args: &[&[u8]],
+        call: Option<Label>,
         effects: &mut impl Effects,
-    ) -> Result<(), EffectError> {
+    ) -> Result<Option<Output>, EffectError> {
         let record =
             *self.audit.append(self.clock.now_ms(), session, Some(spec.id), Some(digest), AuditKind::EffectStarted);
-        let result = effects.run(spec, args, &record);
-        let kind = if result.is_ok() { AuditKind::EffectSucceeded } else { AuditKind::EffectFailed };
+        if let Err(e) = self.flush() {
+            self.log(session, Some(spec.id), Some(digest), AuditKind::EffectFailed);
+            return Err(EffectError(format!("audit sink unavailable, effect not run: {}", e.0)));
+        }
+        let result = effects.run(spec, args, &record).and_then(|value| match (spec.output, call) {
+            (Some(out), Some(call)) => Ok(Some(Output { value, label: out.join(call) })),
+            _ if value.is_empty() => Ok(None),
+            _ => Err(EffectError(format!("{} returned output it does not declare", spec.name))),
+        });
+        let kind = match &result {
+            Ok(Some(o)) => AuditKind::EffectReturned(Sha256::digest(&o.value).into()),
+            Ok(None) => AuditKind::EffectSucceeded,
+            Err(_) => AuditKind::EffectFailed,
+        };
         self.log(session, Some(spec.id), Some(digest), kind);
         result
+    }
+
+    /// Hands the sink every entry it has not stored yet, stopping at the first failure.
+    fn flush(&mut self) -> Result<(), SinkError> {
+        let Some(sink) = self.sink.as_mut() else { return Ok(()) };
+        for e in &self.audit.entries()[self.stored..] {
+            sink.append(e)?;
+            self.stored += 1;
+        }
+        Ok(())
     }
 
     fn request_approval(
@@ -461,8 +526,11 @@ impl<C: Clock> Gate<C> {
         Refusal { reason, detail: detail.into(), remedy: remedy.into(), grantor }
     }
 
+    /// Appends an entry. A sink failure here only delays storage: the entry
+    /// is retried on the next append, and effects wait for it.
     fn log(&mut self, session: SessionId, action: Option<ActionId>, digest: Option<Digest>, kind: AuditKind) {
         self.audit.append(self.clock.now_ms(), session, action, digest, kind);
+        let _ = self.flush();
     }
 
     fn fresh_nonce(&mut self) -> Nonce {

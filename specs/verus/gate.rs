@@ -10,6 +10,8 @@ pub enum Effect {
     LocalReversible,
     LocalIrreversible,
     External,
+    /// Reads from off the device: runs at once, but its arguments leave the device.
+    Fetch,
 }
 
 pub struct ActionMeta {
@@ -68,7 +70,12 @@ pub open spec fn args_label(labels: Seq<Label>, args: Seq<usize>) -> Label
 }
 
 pub open spec fn is_immediate(e: Effect) -> bool {
-    e is Read || e is LocalReversible
+    e is Read || e is LocalReversible || e is Fetch
+}
+
+/// Arguments of these effects leave the device, so egress clearance applies (I3).
+pub open spec fn leaves_device(e: Effect) -> bool {
+    e is External || e is Fetch
 }
 
 /// Gate steps 1–4. `approval_valid` means a signed approval matching this
@@ -92,7 +99,7 @@ pub fn decide(
             &&& valid_handles(table.labels@, inv.args@)
             &&& (args_label(table.labels@, inv.args@).integrity >= meta.integrity_floor
                 || approval_valid)
-            &&& (meta.effect is External ==> subset(
+            &&& (leaves_device(meta.effect) ==> subset(
                 args_label(table.labels@, inv.args@).secrecy,
                 meta.egress_clearance,
             ))
@@ -152,11 +159,11 @@ pub fn decide(
     assert(inv.args@.take(k as int) =~= inv.args@);
 
     // 3. Egress clearance for anything leaving the device.
-    let external = match meta.effect {
-        Effect::External => true,
+    let leaves = match meta.effect {
+        Effect::External | Effect::Fetch => true,
         _ => false,
     };
-    if external && (acc.secrecy & meta.egress_clearance) != acc.secrecy {
+    if leaves && (acc.secrecy & meta.egress_clearance) != acc.secrecy {
         return Decision::Denied(Refusal::EgressNotCleared);
     }
 
@@ -166,7 +173,7 @@ pub fn decide(
     }
 
     match meta.effect {
-        Effect::Read | Effect::LocalReversible => Decision::Execute,
+        Effect::Read | Effect::LocalReversible | Effect::Fetch => Decision::Execute,
         _ => Decision::Queue,
     }
 }

@@ -23,6 +23,7 @@ fn registry() -> Registry {
         params,
         draft_for: None,
         compensation: None,
+        output: None,
     };
     r.register(mk(SEND, "mail.send", Effect::External, vec![Param::open("to"), Param::open("body")])).unwrap();
     r.register(mk(
