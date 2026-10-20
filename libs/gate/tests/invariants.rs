@@ -167,6 +167,55 @@ mod i3_no_uncleared_egress {
         let text = w.value(S1, b"diagnosis", Label::new(Secrecy::EMPTY.with(HEALTH), Integrity::User));
         assert!(matches!(w.invoke(&Invocation::new(NOTE, [text])), Ok(Decision::Executed(Ok(None)))));
     }
+
+    const GET: ActionId = ActionId(6);
+
+    /// The fixture plus `GET`, a remote read (`Fetch`) cleared for `WORK` that returns web data.
+    fn with_get() -> World {
+        let mut r = registry();
+        r.register(ActionSpec {
+            id: GET,
+            name: "http.get".into(),
+            effect: Effect::Fetch,
+            integrity_floor: Integrity::UntrustedWeb,
+            egress_clearance: Secrecy::EMPTY.with(WORK),
+            params: vec![Param::open("url")],
+            draft_for: None,
+            compensation: None,
+            output: Some(Label::new(Secrecy::EMPTY, Integrity::UntrustedWeb)),
+        })
+        .unwrap();
+        World::with_registry(r, CapSet::new([READ, NOTE, SEND, GET]))
+    }
+
+    #[test]
+    fn fetch_arguments_are_egress() {
+        let mut w = with_get();
+        let url =
+            w.value(S1, b"https://x.example/?q=diagnosis", Label::new(Secrecy::EMPTY.with(HEALTH), Integrity::User));
+        assert_eq!(w.invoke(&Invocation::new(GET, [url])).unwrap_err().reason, Reason::EgressNotCleared);
+        assert!(w.fx.calls.is_empty());
+    }
+
+    #[test]
+    fn secrets_read_before_a_fetch_cannot_leave_through_it() {
+        let mut w = with_get();
+        let secret = w.value(S1, b"diagnosis", Label::new(Secrecy::EMPTY.with(HEALTH), Integrity::User));
+        let url = w.user(b"https://x.example/");
+        w.table.view(S1).read(secret).unwrap();
+        assert_eq!(w.invoke(&Invocation::new(GET, [url])).unwrap_err().reason, Reason::EgressNotCleared);
+    }
+
+    #[test]
+    fn cleared_fetch_runs_at_once_and_returns_output() {
+        let mut w = with_get();
+        w.fx.returns = b"<html>".to_vec();
+        let url = w.value(S1, b"https://x.example/", Label::new(Secrecy::EMPTY.with(WORK), Integrity::User));
+        let Ok(Decision::Executed(Ok(Some(out)))) = w.invoke(&Invocation::new(GET, [url])) else {
+            panic!("expected the fetch to run now")
+        };
+        assert_eq!(out.label, Label::new(Secrecy::EMPTY.with(WORK), Integrity::UntrustedWeb));
+    }
 }
 
 mod i4_audit_before_effect {

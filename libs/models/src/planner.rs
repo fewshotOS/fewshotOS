@@ -50,6 +50,7 @@ pub fn render_input(input: &PlannerInput, error: Option<&str>) -> String {
             Effect::LocalReversible => "local, reversible",
             Effect::LocalIrreversible => "local, irreversible",
             Effect::External => "external",
+            Effect::Fetch => "remote read",
         };
         let params: Vec<String> = a
             .params

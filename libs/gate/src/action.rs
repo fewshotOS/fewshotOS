@@ -20,12 +20,20 @@ pub enum Effect {
     LocalIrreversible,
     /// Leaves the device: sends, pays, posts.
     External,
+    /// Reads from off the device, such as an HTTP GET: runs at once and may
+    /// return output, but its arguments leave the device.
+    Fetch,
 }
 
 impl Effect {
     /// Runs at once; otherwise the effect waits in the outbox until commit.
     pub fn is_immediate(self) -> bool {
-        matches!(self, Effect::Read | Effect::LocalReversible)
+        matches!(self, Effect::Read | Effect::LocalReversible | Effect::Fetch)
+    }
+
+    /// The call's data leaves the device, so egress clearance applies (I3).
+    pub fn leaves_device(self) -> bool {
+        matches!(self, Effect::External | Effect::Fetch)
     }
 }
 
@@ -314,8 +322,19 @@ mod tests {
         let r = registry([
             ActionSpec { output: out, ..spec(NOTE, Effect::Read, 1) },
             ActionSpec { output: out, ..spec(DRAFT, Effect::LocalReversible, 1) },
+            ActionSpec { output: out, ..spec(UNSEND, Effect::Fetch, 1) },
         ]);
         assert_eq!(r.validate(), Ok(()));
+    }
+
+    #[test]
+    fn only_external_and_fetch_leave_the_device() {
+        let leaves: Vec<bool> =
+            [Effect::Read, Effect::LocalReversible, Effect::LocalIrreversible, Effect::External, Effect::Fetch]
+                .map(Effect::leaves_device)
+                .into();
+        assert_eq!(leaves, [false, false, false, true, true]);
+        assert!(Effect::Fetch.is_immediate());
     }
 
     #[test]

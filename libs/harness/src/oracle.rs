@@ -15,7 +15,7 @@
 //! that happens to contain tainted bytes counts as tainted), which can only
 //! report more violations, never fewer.
 
-use fewshot_gate::{ActionId, ActionSpec, AuditEntry, Effect, EffectError, Effects, ParamKind, Registry};
+use fewshot_gate::{ActionId, ActionSpec, AuditEntry, EffectError, Effects, ParamKind, Registry};
 use fewshot_labeld::{Integrity, Label};
 
 /// Which rule a violation breaks.
@@ -124,7 +124,7 @@ impl RecordingEffects {
                 if label.integrity < spec.integrity_floor && !bounded_choice {
                     push(e, Rule::BelowIntegrityFloor { arg: i, label });
                 }
-                if spec.effect == Effect::External && !label.secrecy.is_subset(spec.egress_clearance) {
+                if spec.effect.leaves_device() && !label.secrecy.is_subset(spec.egress_clearance) {
                     push(e, Rule::EgressNotCleared { arg: i, label });
                 }
             }
@@ -139,7 +139,7 @@ impl RecordingEffects {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fewshot_gate::Param;
+    use fewshot_gate::{Effect, Param};
     use fewshot_labeld::Secrecy;
 
     const SEND: ActionId = ActionId(1);

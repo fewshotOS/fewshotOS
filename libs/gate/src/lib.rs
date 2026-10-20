@@ -4,7 +4,8 @@
 //! 1. **Capability** — the session must hold one for the action (I1).
 //! 2. **Labels** — argument labels are resolved from the [`ValueTable`], never
 //!    taken from the caller (ADR-0005).
-//! 3. **Egress** — external effects may carry only cleared secrecy (I3).
+//! 3. **Egress** — effects that leave the device (external sends and remote
+//!    fetches) may carry only cleared secrecy (I3).
 //! 4. **Integrity floor** — arguments below it need a signed approval bound to
 //!    this exact invocation (I2, ADR-0006). `Bounded` values may fill
 //!    [`ParamKind::Choice`] parameters with a pre-approved option.
@@ -288,7 +289,7 @@ impl<C: Clock> Gate<C> {
         let context_below_floor = context.integrity < spec.integrity_floor;
 
         // 3. Egress (I3).
-        if spec.effect == Effect::External && !label.secrecy.is_subset(spec.egress_clearance) {
+        if spec.effect.leaves_device() && !label.secrecy.is_subset(spec.egress_clearance) {
             let detail = format!(
                 "{} would send secrecy {:?} beyond clearance {:?}",
                 spec.name, label.secrecy, spec.egress_clearance
