@@ -1,0 +1,24 @@
+[package]
+name = "fewshot"
+description = "The Fewshot command: an MCP server over the Fewshot runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+fewshot-runtime.workspace = true
+fewshot-approval.workspace = true
+fewshot-gate.workspace = true
+fewshot-labeld.workspace = true
+fewshot-plan.workspace = true
+fewshot-executor.workspace = true
+fewshot-models.workspace = true
+serde_json = { workspace = true, features = ["std"] }
+clap = { version = "4.5.51", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lints]
+workspace = true
