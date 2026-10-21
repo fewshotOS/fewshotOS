@@ -84,6 +84,10 @@ struct World {
 /// An `untrusted_web` root holding `page.txt`, and a client that may use
 /// every built-in action.
 fn world_with(plan: impl FnOnce(&Path) -> Plan) -> World {
+    build(false, plan)
+}
+
+fn build(telemetry: bool, plan: impl FnOnce(&Path) -> Plan) -> World {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("root");
     let data = tmp.path().join("data");
@@ -93,6 +97,7 @@ fn world_with(plan: impl FnOnce(&Path) -> Plan) -> World {
         r#"
 [runtime]
 data_dir = '{data}'
+telemetry = {telemetry}
 
 [tags]
 web = 3
@@ -107,7 +112,8 @@ integrity = "untrusted_web"
 secrecy = ["web"]
 "#,
         data = data.display(),
-        root = root.display()
+        root = root.display(),
+        telemetry = telemetry
     ))
     .unwrap();
     let rt = builtin_runtime(config, approver().verifying_key()).unwrap();
@@ -378,4 +384,35 @@ fn serve_answers_requests_line_by_line() {
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[0]["id"], 1);
     assert_eq!(lines[1]["id"], 2);
+}
+
+#[test]
+fn telemetry_records_each_call_outcome_and_nothing_else() {
+    let mut w = build(true, |_| Plan { steps: vec![] });
+    let target = w.path("secret-name.txt");
+    w.ok("notes_append", json!({ "text": "private words" }));
+    w.mode(Mode::Deny);
+    w.tool("fs_write", json!({ "path": target, "content": "x" }));
+    w.mode(Mode::Approve);
+    w.ok("fs_write", json!({ "path": target, "content": "x" }));
+    w.mode(Mode::Unavailable);
+    w.tool("fs_write", json!({ "path": target, "content": "y" }));
+
+    let file = w.data.join("telemetry.jsonl");
+    let events = fewshot_runtime::telemetry::load(&file).unwrap();
+    let got: Vec<(&str, &str)> = events.iter().map(|e| (e.action.as_str(), e.outcome.as_str())).collect();
+    assert_eq!(got, [("notes.append", "auto"), ("fs.write", "denied"), ("fs.write", "approved")]);
+    assert!(events.iter().all(|e| e.client == "claude-code"));
+    let raw = std::fs::read_to_string(&file).unwrap();
+    assert!(!raw.contains("secret-name") && !raw.contains("private"), "{raw}");
+}
+
+#[test]
+fn telemetry_off_writes_nothing() {
+    let mut w = world();
+    w.ok("notes_append", json!({ "text": "a" }));
+    w.mode(Mode::Deny);
+    let target = w.path("t.txt");
+    w.tool("fs_write", json!({ "path": target, "content": "x" }));
+    assert!(!w.data.join("telemetry.jsonl").exists());
 }

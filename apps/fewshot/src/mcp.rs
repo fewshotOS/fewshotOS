@@ -14,9 +14,11 @@ use fewshot_executor::{Planner, Reader};
 use fewshot_gate::{ActionSpec, ApprovalRequest, Effects, ParamKind, Registry, SignedApproval};
 use fewshot_labeld::{Handle, Label, SessionId};
 use fewshot_plan::Schema;
+use fewshot_runtime::telemetry::{Event, Outcome, Telemetry};
 use fewshot_runtime::{CallResult, Runtime, RuntimeError, TaskInput, TaskOutcome};
 use serde_json::{Map, Value, json};
 use std::io::{BufRead, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The MCP protocol version this server speaks.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -79,6 +81,8 @@ pub struct Server<E: Effects, A: Approvals> {
     planner: Box<dyn Planner>,
     /// Handles given to the client; `v<n>` is `handles[n - 1]`.
     handles: Vec<Handle>,
+    /// Records each call's outcome when `[runtime] telemetry` is on.
+    telemetry: Telemetry,
 }
 
 impl<E: Effects, A: Approvals> Server<E, A> {
@@ -91,7 +95,8 @@ impl<E: Effects, A: Approvals> Server<E, A> {
         planner: Box<dyn Planner>,
     ) -> Result<Self, RuntimeError> {
         let session = rt.open_session(client)?;
-        Ok(Server { rt, session, client: client.into(), approvals, reader, planner, handles: Vec::new() })
+        let telemetry = Telemetry::from_config(rt.config());
+        Ok(Server { rt, session, client: client.into(), approvals, reader, planner, handles: Vec::new(), telemetry })
     }
 
     /// The runtime, for tests and the binary's shutdown.
@@ -268,11 +273,16 @@ impl<E: Effects, A: Approvals> Server<E, A> {
             handles.push(self.argument(v)?);
         }
         let mut approval: Option<SignedApproval> = None;
+        let mut asked = false;
         loop {
             let result = match self.rt.call(self.session, &spec.name, handles.clone(), approval.take()) {
                 Ok(r) => r,
                 Err(e) => return Ok(tool_error(&e.to_string())),
             };
+            // A call that went ahead without a prompt; prompts are recorded in `ask`.
+            if !asked && matches!(result, CallResult::Done { .. } | CallResult::Queued { .. } | CallResult::Failed(_)) {
+                record(&self.telemetry, &self.client, &spec.name, Outcome::Auto);
+            }
             return Ok(match result {
                 CallResult::Done { output: Some(h) } => tool_json(&self.handle_info(h)),
                 CallResult::Done { output: None } => tool_json(&json!({ "status": "done" })),
@@ -283,20 +293,18 @@ impl<E: Effects, A: Approvals> Server<E, A> {
                 })),
                 CallResult::Failed(e) => tool_error(&format!("{} failed: {e}", spec.name)),
                 CallResult::Refused(r) => tool_error(&render_refusal(&r, Some(&spec.name))),
-                CallResult::NeedsApproval(req) => match self.ask(&req, spec) {
-                    Ok(a) => {
-                        approval = Some(a);
-                        continue;
+                CallResult::NeedsApproval(req) => {
+                    asked = true;
+                    match ask(&mut self.approvals, &self.telemetry, &self.client, &req, spec) {
+                        Ok(a) => {
+                            approval = Some(a);
+                            continue;
+                        }
+                        Err(why) => tool_error(&why),
                     }
-                    Err(why) => tool_error(&why),
-                },
+                }
             });
         }
-    }
-
-    /// Sends `req` to the approval app. `Err` is the text to show the client.
-    fn ask(&mut self, req: &ApprovalRequest, spec: &ActionSpec) -> Result<SignedApproval, String> {
-        ask(&mut self.approvals, &self.client, req, spec)
     }
 
     /// A literal (a string) or a handle (`{"handle":"v3"}`) from this session.
@@ -412,10 +420,12 @@ impl<E: Effects, A: Approvals> Server<E, A> {
             Some(_) => return Err(invalid("inputs must be an object")),
         }
         let registry: Registry = self.rt.gate().registry().clone();
-        let (approvals, client) = (&mut self.approvals, self.client.as_str());
+        // Calls the plan makes without asking are not seen here, so only its
+        // prompts reach the telemetry.
+        let (approvals, telemetry, client) = (&mut self.approvals, &self.telemetry, self.client.as_str());
         let outcome = self.rt.run_task(self.session, request, &inputs, &mut *self.planner, &mut *self.reader, |req| {
             let spec = registry.get(req.action).ok_or("the plan called an unknown action")?;
-            ask(approvals, client, req, spec)
+            ask(approvals, telemetry, client, req, spec)
         });
         Ok(match outcome {
             Ok(TaskOutcome::Done { queued }) => tool_json(&json!({
@@ -452,20 +462,42 @@ impl<E: Effects, A: Approvals> Server<E, A> {
     }
 }
 
-/// Renders `req` through the fixed template and asks `approvals`.
+/// Renders `req` through the fixed template, asks `approvals`, and records
+/// the user's answer in `telemetry`. An unreachable approval app asked no one,
+/// so it is not recorded.
 fn ask<A: Approvals>(
     approvals: &mut A,
+    telemetry: &Telemetry,
     client: &str,
     req: &ApprovalRequest,
     spec: &ActionSpec,
 ) -> Result<SignedApproval, String> {
     let text = render_request(req, spec);
-    match approvals.ask(client, WireItem::from_request(req, &spec.name, text.clone())) {
+    let answer = approvals.ask(client, WireItem::from_request(req, &spec.name, text.clone()));
+    let outcome = match &answer {
+        Answer::Approved(_) => Some(Outcome::Approved),
+        Answer::Denied => Some(Outcome::Denied),
+        Answer::Timeout => Some(Outcome::Timeout),
+        Answer::Unavailable(_) => None,
+    };
+    if let Some(outcome) = outcome {
+        record(telemetry, client, &spec.name, outcome);
+    }
+    match answer {
         Answer::Approved(a) => Ok(a),
         Answer::Denied => Err(format!("the user declined: {text}")),
         Answer::Timeout => Err(format!("no answer from the approval app in time; nothing was done: {text}")),
         Answer::Unavailable(why) if why.contains(START_HINT) => Err(why),
         Answer::Unavailable(why) => Err(format!("{why}; {START_HINT}")),
+    }
+}
+
+/// Appends one telemetry event. A failure to write it never fails the call.
+fn record(telemetry: &Telemetry, client: &str, action: &str, outcome: Outcome) {
+    let ts_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    let event = Event { ts_ms, client: client.into(), action: action.into(), outcome };
+    if let Err(e) = telemetry.record(&event) {
+        eprintln!("fewshot: could not record telemetry: {e}");
     }
 }
 

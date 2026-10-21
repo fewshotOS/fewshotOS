@@ -3,10 +3,10 @@
 use clap::{Parser, Subcommand};
 use fewshot::{Server, SocketApprovals};
 use fewshot_models::{HttpChat, OllamaConfig, OllamaPlanner, OllamaReader};
-use fewshot_runtime::{Config, builtin_runtime};
+use fewshot_runtime::{Config, builtin_runtime, telemetry};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
 #[command(name = "fewshot", version, about = "Fewshot: labeled data and approvals for AI agents")]
@@ -27,6 +27,12 @@ enum Command {
         #[arg(long)]
         client: String,
     },
+    /// Approval-rate summary from the local telemetry file.
+    Stats {
+        /// How many days back to count.
+        #[arg(long, default_value_t = 7)]
+        days: u64,
+    },
 }
 
 fn main() -> ExitCode {
@@ -46,7 +52,19 @@ fn run(cli: Cli) -> Result<(), String> {
     let config = Config::load(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     match cli.command {
         Command::Mcp { client } => mcp(config, &client),
+        Command::Stats { days } => stats(&config, days),
     }
+}
+
+fn stats(config: &Config, days: u64) -> Result<(), String> {
+    if !config.runtime.telemetry {
+        eprintln!("fewshot: telemetry is off; set `telemetry = true` under [runtime] to record calls");
+    }
+    let path = config.data_dir().join("telemetry.jsonl");
+    let events = telemetry::load(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    print!("{}", telemetry::to_text(&telemetry::stats(&events, now, days), days));
+    Ok(())
 }
 
 fn mcp(config: Config, client: &str) -> Result<(), String> {
