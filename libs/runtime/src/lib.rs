@@ -10,8 +10,8 @@
 //! The runtime is a thin, trusted host over the gate: it never computes or
 //! changes a label itself. Outputs come back already labeled by the gate, and
 //! the runtime brings them into the value table with exactly that label. It
-//! holds no approval signing key and must never construct an
-//! [`Approver`](fewshot_gate::Approver).
+//! holds no approval signing key and never constructs the gate's approval
+//! signer; a source test in `apps/fewshot` checks this crate's sources.
 //!
 //! `fewshot-runtime` is a `std` crate: it reads files, the wall clock and the
 //! config directory. The policy core it hosts stays `no_std`.
@@ -19,6 +19,7 @@
 pub mod actions;
 pub mod audit;
 pub mod config;
+pub mod task;
 pub mod timeline;
 
 use std::collections::BTreeMap;
@@ -36,6 +37,7 @@ use fewshot_plan::Schema;
 
 pub use audit::{AuditFileError, FileAuditSink, entry_from_json, entry_to_json, load_dir, load_file};
 pub use config::{ClientConfig, Config, ConfigError, RootConfig};
+pub use task::{TaskInput, TaskOutcome, ValueInfo};
 
 /// The runtime: one config, one value table, one gate, the effects
 /// implementation, and the sessions it has opened with their client names.
@@ -154,21 +156,10 @@ impl<E: Effects> Runtime<E> {
 
     /// Opens a session for `client`, holding exactly that client's actions.
     pub fn open_session(&mut self, client: &str) -> Result<SessionId, RuntimeError> {
-        let cc = self.client(client)?;
-        let mut ids = Vec::with_capacity(cc.actions.len());
-        for name in &cc.actions {
-            let id = self
-                .gate
-                .registry()
-                .iter()
-                .find(|a| &a.name == name)
-                .map(|a| a.id)
-                .ok_or_else(|| RuntimeError::UnknownAction { client: client.to_string(), action: name.clone() })?;
-            ids.push(id);
-        }
+        let caps = self.caps_for(client)?;
         let session = SessionId(self.next_session);
         self.next_session += 1;
-        self.gate.open_session(session, CapSet::new(ids));
+        self.gate.open_session(session, caps);
         self.sessions.insert(session, client.to_string());
         Ok(session)
     }
@@ -306,6 +297,23 @@ impl<E: Effects> Runtime<E> {
             .iter()
             .find(|c| c.name == name)
             .ok_or_else(|| RuntimeError::UnknownClient { name: name.to_string() })
+    }
+
+    /// Exactly the actions `client` is configured with.
+    fn caps_for(&self, client: &str) -> Result<CapSet, RuntimeError> {
+        let cc = self.client(client)?;
+        let mut ids = Vec::with_capacity(cc.actions.len());
+        for name in &cc.actions {
+            let id = self
+                .gate
+                .registry()
+                .iter()
+                .find(|a| &a.name == name)
+                .map(|a| a.id)
+                .ok_or_else(|| RuntimeError::UnknownAction { client: client.to_string(), action: name.clone() })?;
+            ids.push(id);
+        }
+        Ok(CapSet::new(ids))
     }
 
     /// The client of an open session, or `UnknownSession`.

@@ -149,6 +149,13 @@ New binary crate `apps/fewshot` (`clap` for subcommands). `fewshot mcp --client 
 - Logging goes to stderr only. stdout carries protocol only.
 - **Tests:** an in-process test drives `initialize`, `tools/list`, a literal call, a handle round trip, `fewshot_reveal` raising the principal label (a following `fs.write` then needs approval), and malformed requests. A test with a fake approver covers approved, denied and timeout.
 
+As built (written by the reviewer):
+- `apps/fewshot`: `Server<E, A: Approvals>` (`mcp.rs`) handles one line at a time; `SocketApprovals` (`approvals.rs`) does `Hello`, one `Request` per item, and the answer on a worker thread with `recv_timeout`, checking the answer's id and digest. Calls are answered one at a time, so nothing is batched.
+- Read results are `{"handle":"v1","bytes":N,"from":"action:fs.read","label":{"integrity":…,"secrecy":[tag names]}}`. `fewshot_extract` takes `options` (choice) or `max_len` (text, default 2000).
+- `Runtime::run_task` (`libs/runtime/src/task.rs`): planner input lists inputs as "N bytes from <origin>", plan literals are interned at the client's literal label joined with the principal label (not `User`: the request came from the client), approvals go through a callback, and checkpoints commit with `commit_with_saga`. `Runtime::describe` gives a value's label, length and origin without reading it.
+- Ollama settings: defaults, then `[ollama]`, then the `FEWSHOT_*` environment variables.
+- The source test scans `apps/fewshot/src` and `libs/runtime/src` (not tests, which sign with a fixed test key) for `Approver`, `approve_item`, `load_or_create` and `from_secret`.
+
 ## T5 — Approval protocol and the approval app
 
 **`libs/approval`** (no GUI): the wire protocol and everything that can be tested headless.
@@ -170,6 +177,7 @@ New binary crate `apps/fewshot` (`clap` for subcommands). `fewshot mcp --client 
 - Only when `[runtime] telemetry = true`. Appends to `data_dir/telemetry.jsonl`: `{ts, client, action, outcome: approved|denied|timeout|auto}`. Nothing else: no argument values, no paths, no URLs.
 - `fewshot stats [--days 7]` prints prompts per active hour per client, the approval rate, and the most-prompted actions. An "active hour" is a clock hour with at least one call.
 - A test checks nothing is written when telemetry is off, and a source test checks `libs/runtime/src/telemetry.rs` has no `std::net`, `ureq` or socket use.
+- Split: **T7a** (Qwen) is the `libs/runtime/src/telemetry.rs` module: `Outcome`, `Event`, `Telemetry::{from_config, record}`, `load`, `stats`, `to_text`. **T7b** (reviewer) records an event per `tools/call` in `fewshot mcp` (`auto` when no approval was asked) and adds `fewshot stats`.
 
 ## T8 — Builds and installers
 
