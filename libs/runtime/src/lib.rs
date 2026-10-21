@@ -20,6 +20,7 @@ pub mod actions;
 pub mod audit;
 pub mod config;
 pub mod task;
+pub mod telemetry;
 pub mod timeline;
 
 use std::collections::BTreeMap;
